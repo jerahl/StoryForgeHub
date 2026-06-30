@@ -1,4 +1,4 @@
-# Stephen's Codex — web app
+# Novel's Codex — web app
 
 A hosted PHP + MySQL version of your Codex (the same design as the `Stephen's Codex`
 template): the library of three books, each with Characters, Locations, Factions,
