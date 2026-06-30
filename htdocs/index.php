@@ -84,8 +84,16 @@ if ($method === 'POST') {
         $db = $_POST['db']; $name = trim($_POST['name']);
         $slug = $_POST['slug'] ?: strtolower(preg_replace('/[^a-z0-9]+/i','-', $name));
         $slug = trim(preg_replace('/-+/', '-', $slug), '-');
-        $stub = "# $name\n\n- **Slug:** $slug\n- **Status:** seed\n- **Type:** " . DBMETA[$db]['singular']
-              . "\n- **" . DBMETA[$db]['detailLabel'] . ":** \n- **First appearance:** \n\n## Overview\n\n";
+        $meta = dbmeta($db, book_profile($book));
+        // Profile field template prefills extra labels (fiction adds none, so its
+        // stub stays byte-for-byte the legacy one). Skip the detail label / first
+        // appearance, which the stub already prints.
+        $skip = ['slug','status','type','first appearance', strtolower($meta['detailLabel'])];
+        $tmpl = '';
+        foreach (field_template_for(book_profile($book), $db) as $lbl)
+            if (!in_array(strtolower($lbl), $skip, true)) $tmpl .= "- **$lbl:** \n";
+        $stub = "# $name\n\n- **Slug:** $slug\n- **Status:** seed\n- **Type:** " . $meta['singular']
+              . "\n- **" . $meta['detailLabel'] . ":** \n- **First appearance:** \n" . $tmpl . "\n## Overview\n\n";
         $e = md_parse_entry($stub, $db, $slug);
         save_entry($book, $db, $e);
         flash('Created “' . $name . '”. Now fill it in.');
@@ -173,6 +181,11 @@ if ($method === 'POST') {
         if ($r['status'] === 'conflict' || $r['status'] === 'error')
             redirect(['p'=>'chapter_edit','book'=>$book,'id'=>$_POST['cid']]);
         redirect(['p'=>'chapter','book'=>$book,'id'=>$_POST['cid']]);
+    }
+    if ($a === 'book_profile') {
+        set_book_profile($book, $_POST['profile'] ?? 'fiction');
+        flash('Book profile set to “'.profile_label($_POST['profile'] ?? 'fiction').'”.');
+        redirect(['p'=>'book','book'=>$book]);
     }
     if ($a === 'act_add')   { add_act($book, $_POST['title'] ?? ''); redirect(['p'=>'manuscript','book'=>$book,'view'=>'grid']); }
     if ($a === 'act_rename'){ rename_act((int)($_POST['id'] ?? 0), $book, $_POST['title'] ?? '', $_POST['subtitle'] ?? ''); redirect(['p'=>'manuscript','book'=>$book,'view'=>'grid']); }
@@ -305,7 +318,7 @@ echo '<div class="content'.($wideView ? ' wide' : '').'">';
 if (!empty($_SESSION['flash'])) { [$m,$t]=$_SESSION['flash']; echo '<div class="flash '.($t==='err'?'err':'').'">'.e($m).'</div>'; unset($_SESSION['flash']); }
 
 /* helper renderers */
-function db_chip($db){ $m=DBMETA[$db]; return '<span class="chip" style="background:'.$m['hue'].'">'.$m['letter'].'</span>'; }
+function db_chip($db){ $m=dbmeta($db); return '<span class="chip" style="background:'.$m['hue'].'">'.$m['letter'].'</span>'; }
 function status_select($book_id, $c, $return){
     $opts = '';
     foreach (['outline','drafted','revised'] as $s)
@@ -396,11 +409,21 @@ case 'library':
     break;
 
 case 'book':
+    $bprofile = $book['profile'] ?? 'fiction';
     echo '<div class="pagehead"><div><h1>'.e($book['title']).'</h1>';
     echo '<p class="desc"><strong>'.e($book['series']).' · Book '.e($book['num']).'</strong> — '.e($book['logline'] ?: 'No logline yet.').'</p></div></div>';
     echo '<div class="bt-stats" style="margin:6px 0 4px"><span><b>'.number_format($book['wordCount']).'</b> words</span><span><b>'.$book['chapterCount'].'</b> chapters</span><span><b>'.$book['entryCount'].'</b> entries</span><span><b>'.$book['threadCount'].'</b> open threads</span></div>';
+    // Profile picker — selects the codex taxonomy (databases, field templates,
+    // manuscript band labels, diagnostics) for this book. Fiction is the default.
+    echo '<form method="post" class="profileform" style="margin:10px 0 2px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+       . '<input type="hidden" name="action" value="book_profile"><input type="hidden" name="book" value="'.e($book['id']).'">'
+       . '<label class="f" style="margin:0">Book profile</label><select name="profile" onchange="this.form.submit()">';
+    foreach (profile_ids() as $pid)
+        echo '<option value="'.e($pid).'"'.($pid===$bprofile?' selected':'').'>'.e(profile_label($pid)).'</option>';
+    echo '</select><span class="muted" style="font-size:12px">'.e(profile_desc($bprofile)).'</span>'
+       . '<noscript><button class="btn sm">Set</button></noscript></form>';
     echo '<h2 style="font-size:15px;margin-top:26px">Databases in this book</h2><div class="cards">';
-    foreach (DB_KEYS as $k) { $m=DBMETA[$k]; $c=(int)val("SELECT COUNT(*) FROM entries WHERE book_id=? AND db_key=?",[$book['id'],$k]);
+    foreach (db_keys_for($bprofile) as $k) { $m=dbmeta($k,$bprofile); $c=(int)val("SELECT COUNT(*) FROM entries WHERE book_id=? AND db_key=?",[$book['id'],$k]);
         echo '<a class="card" href="'.url(['p'=>'db','book'=>$book['id'],'db'=>$k]).'"><div class="cmeta">'.db_chip($k).'<span class="ctitle" style="margin:0">'.$m['title'].'</span><span class="count" style="margin-left:auto">'.$c.'</span></div><div class="clog">'.e($m['desc']).'</div></a>';
     }
     echo '</div>';
@@ -433,7 +456,7 @@ case 'book':
     break;
 
 case 'db':
-    $db = $_GET['db']; $m = DBMETA[$db];
+    $db = $_GET['db']; $m = dbmeta($db, $book['profile'] ?? 'fiction');
     $rows = get_entries($book['id'], $db);
     echo '<div class="pagehead">'.db_chip($db).'<div><h1>'.$m['title'].'</h1><p class="desc">'.e($m['desc']).'</p></div></div>';
     echo '<div class="toolbar"><a class="btn primary sm" href="'.url(['p'=>'entry_new','book'=>$book['id'],'db'=>$db]).'">+ New '.strtolower($m['singular']).'</a></div>';
@@ -452,7 +475,8 @@ case 'entry':
     $e = get_entry($book['id'], $db, $slug);
     if (!$e) { echo '<p class="empty">Entry not found.</p>'; break; }
     echo '<div class="pagehead">'.db_chip($db).'<div><h1>'.e($e['name']).' '.status_pill($e['status']).'</h1>';
-    echo '<p class="desc"><span class="tag" style="color:'.DBMETA[$db]['hue'].';background:'.DBMETA[$db]['hue'].'18">'.e($e['type']).'</span> '.($e['firstApp']?'· first appearance '.e($e['firstApp']):'').'</p></div></div>';
+    $emeta = dbmeta($db, $book['profile'] ?? 'fiction');
+    echo '<p class="desc"><span class="tag" style="color:'.$emeta['hue'].';background:'.$emeta['hue'].'18">'.e($e['type']).'</span> '.($e['firstApp']?'· first appearance '.e($e['firstApp']):'').'</p></div></div>';
     echo '<div class="toolbar"><a class="btn sm" href="'.url(['p'=>'entry_edit','book'=>$book['id'],'db'=>$db,'slug'=>$slug]).'">Edit</a>'
        . '<a class="btn sm" href="'.url(['p'=>'entry_md','book'=>$book['id'],'db'=>$db,'slug'=>$slug]).'">View .md</a></div>';
     echo '<div class="entrybody">';
@@ -564,7 +588,7 @@ case 'entry_edit':
     break;
 
 case 'entry_new':
-    $db = $_GET['db']; $m = DBMETA[$db];
+    $db = $_GET['db']; $m = dbmeta($db, $book['profile'] ?? 'fiction');
     echo '<div class="pagehead">'.db_chip($db).'<div><h1>New '.strtolower($m['singular']).'</h1></div></div>';
     echo '<form method="post" style="max-width:520px"><input type="hidden" name="action" value="entry_new"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="db" value="'.e($db).'">';
     echo '<label class="f">Name</label><input type="text" name="name" required autofocus>';
@@ -584,6 +608,8 @@ case 'manuscript':
     if ($view === 'grid' && $ch) {
         // Act bands → chapter columns → scene cards (read-only). Acts have no CRUD
         // yet, so chapters with no act_id fall into a single "Chapters" band.
+        $bandLbl = bands_for($book['profile'] ?? 'fiction');   // Act/Acts vs Part/Parts per profile
+        $actS = $bandLbl['actSingular']; $actP = $bandLbl['actPlural'];
         $acts = get_acts($book['id']);
         $byAct = [];
         foreach ($ch as $c) { $k = ($c['act_id'] !== null && $c['act_id'] !== '') ? (int)$c['act_id'] : 0; $byAct[$k][] = $c; }
@@ -604,12 +630,12 @@ case 'manuscript':
         if (!empty($byAct[0])) $bands[] = [null, $byAct[0]];
         // ---- Acts manager: create / rename / reorder / delete ----
         $bh = '<input type="hidden" name="book" value="'.e($book['id']).'">';
-        echo '<div class="acts-mgr"><div class="acts-mgr-h">Acts</div>';
+        echo '<div class="acts-mgr"><div class="acts-mgr-h">'.e($actP).'</div>';
         $nacts = count($acts);
         foreach ($acts as $i => $a) {
             echo '<div class="act-row">';
             echo '<form method="post" class="act-edit"><input type="hidden" name="action" value="act_rename">'.$bh.'<input type="hidden" name="id" value="'.(int)$a['id'].'">'
-               . '<input class="act-title-in" name="title" value="'.e($a['title']).'" placeholder="Act title">'
+               . '<input class="act-title-in" name="title" value="'.e($a['title']).'" placeholder="'.e($actS).' title">'
                . '<input class="act-sub-in" name="subtitle" value="'.e($a['subtitle']).'" placeholder="Subtitle (optional)">'
                . '<button class="btn sm">Save</button></form>';
             if ($i > 0)          echo '<form method="post"><input type="hidden" name="action" value="act_move">'.$bh.'<input type="hidden" name="id" value="'.(int)$a['id'].'"><input type="hidden" name="dir" value="up"><button class="btn sm" title="Move up">↑</button></form>';
@@ -617,9 +643,9 @@ case 'manuscript':
             echo '<form method="post" onsubmit="return confirm(\'Delete this act? Its chapters become unassigned (prose untouched).\')"><input type="hidden" name="action" value="act_delete">'.$bh.'<input type="hidden" name="id" value="'.(int)$a['id'].'"><button class="btn sm danger">Delete</button></form>';
             echo '</div>';
         }
-        echo '<form method="post" class="act-add"><input type="hidden" name="action" value="act_add">'.$bh.'<input name="title" placeholder="New act title" required><button class="btn sm primary">+ Add act</button></form>';
+        echo '<form method="post" class="act-add"><input type="hidden" name="action" value="act_add">'.$bh.'<input name="title" placeholder="New '.e(strtolower($actS)).' title" required><button class="btn sm primary">+ Add '.e(strtolower($actS)).'</button></form>';
         echo '</div>';
-        echo '<p class="grid-hint">Drag a chapter\'s ⠿ handle to reorder it or move it between acts. Drag a scene\'s ⠿ handle to reorder scenes within a chapter — <strong>planning only</strong>; your prose isn\'t changed.</p>';
+        echo '<p class="grid-hint">Drag a chapter\'s ⠿ handle to reorder it or move it between '.e(strtolower($actP)).'. Drag a scene\'s ⠿ handle to reorder scenes within a chapter — <strong>planning only</strong>; your prose isn\'t changed.</p>';
         echo '<div class="mgrid">';
         foreach ($bands as $bd) {
             list($a, $cols) = $bd;
@@ -631,13 +657,13 @@ case 'manuscript':
                 $counted = 0;
                 foreach ($scenes as $s2) if (!scene_label_excluded($s2['label'])) $counted += (int)$s2['word_count'];
                 echo '<div class="mcol" data-cid="'.(int)$c['id'].'">'
-                   . '<span class="mcol-handle" draggable="true" title="Drag to reorder / move between acts">⠿</span>'
+                   . '<span class="mcol-handle" draggable="true" title="Drag to reorder / move between '.e(strtolower($actP)).'">⠿</span>'
                    . '<a class="mcol-h" href="'.url(['p'=>'chapter','book'=>$book['id'],'id'=>$c['id']]).'">'
                    . '<span class="mcol-t"><span class="mono">'.e($c['num']).'</span> '.e($c['title']).'</span>'
                    . '<span class="mcol-wc">'.number_format($counted).' words</span></a>';
                 if ($acts) {
                     echo '<form method="post" class="mcol-act"><input type="hidden" name="action" value="chapter_act">'.$bh.'<input type="hidden" name="cid" value="'.(int)$c['id'].'">'
-                       . '<select name="act_id" onchange="this.form.submit()"><option value="">— no act —</option>';
+                       . '<select name="act_id" onchange="this.form.submit()"><option value="">— no '.e(strtolower($actS)).' —</option>';
                     foreach ($acts as $aopt)
                         echo '<option value="'.(int)$aopt['id'].'"'.(((int)($c['act_id'] ?? 0)) === (int)$aopt['id'] ? ' selected' : '').'>'.e($aopt['title']).'</option>';
                     echo '</select></form>';
@@ -849,7 +875,7 @@ case 'chapter':
             $emeta = []; $dbcolor = [];
             foreach (all("SELECT slug,name,db_key,detail,type FROM entries WHERE book_id=?", [$book['id']]) as $r)
                 $emeta[$r['slug']] = ['name'=>$r['name'],'db'=>$r['db_key'],'detail'=>trim((string)($r['detail'] ?: $r['type']))];
-            foreach (DBMETA as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
+            foreach (dbmeta_for($book['profile'] ?? 'fiction') as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
             $tg = array_map(function($t){ return ['phrase'=>$t['phrase'],'slug'=>$t['slug']]; }, build_mention_targets($book['id']));
             echo '<script>window.__scene='.json_encode(['book'=>$book['id'],'targets'=>$tg,'meta'=>$emeta,'db'=>$dbcolor], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).';</script>';
             echo <<<'JS'
@@ -1004,7 +1030,7 @@ case 'chapter_edit':
     if (function_exists('build_mention_targets')) {
         $emeta = []; $dbcolor = [];
         foreach (all("SELECT slug,name,db_key FROM entries WHERE book_id=?", [$book['id']]) as $r) $emeta[$r['slug']] = ['name'=>$r['name'],'db'=>$r['db_key']];
-        foreach (DBMETA as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
+        foreach (dbmeta_for($book['profile'] ?? 'fiction') as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
         $tg = array_map(function($t){ return ['phrase'=>$t['phrase'],'slug'=>$t['slug']]; }, build_mention_targets($book['id']));
         echo '<script>window.__scene='.json_encode(['book'=>$book['id'],'targets'=>$tg,'meta'=>$emeta,'db'=>$dbcolor], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).';</script>';
         echo <<<'JS'
@@ -1229,7 +1255,8 @@ case 'tasks':
     foreach (['high'=>'High','med'=>'Medium','low'=>'Low'] as $k=>$lab) echo '<option value="'.$k.'"'.($k==='med'?' selected':'').'>'.$lab.'</option>';
     echo '</select></div>';
     echo '<div><label class="f">Target database (optional)</label><select name="target_db"><option value="">—</option>';
-    foreach (DB_KEYS as $k) echo '<option value="'.$k.'">'.DBMETA[$k]['title'].'</option>';
+    $tprofile = $book['profile'] ?? 'fiction';
+    foreach (db_keys_for($tprofile) as $k) echo '<option value="'.$k.'">'.e(dbmeta($k,$tprofile)['title']).'</option>';
     echo '</select></div><div><label class="f">Target slug (optional)</label><input type="text" name="target_slug" placeholder="kebab-case"></div>';
     echo '</div>';
     echo '<label class="f" style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="for_claude" value="1" style="width:auto" checked> Flag for Claude</label>';

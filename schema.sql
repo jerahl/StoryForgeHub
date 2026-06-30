@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS books (
   series       VARCHAR(160) DEFAULT '',
   num          VARCHAR(10)  DEFAULT '',
   status       VARCHAR(20)  DEFAULT 'planning',   -- planning|drafting|revising|published
+  profile      VARCHAR(20)  DEFAULT 'fiction',    -- fiction|nonfiction|selfhelp|memoir (Phase 10)
   logline      TEXT,
   genre        VARCHAR(255) DEFAULT '',
   word_target  VARCHAR(20)  DEFAULT '',

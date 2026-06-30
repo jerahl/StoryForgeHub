@@ -2,19 +2,41 @@
 /** repo.php — data access + sync logic (import / push / pull / apply). */
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/md.php';
+require_once __DIR__ . '/profiles.php';   // book profiles (Phase 10): db sets, templates, band labels
 
 /* ----------------------------------------------------------------- books */
+/** Lazy-migration for the Phase 10 book profile. Additive column; existing books
+ *  default to 'fiction' so they behave byte-for-byte as before. */
+function ensure_book_profile() {
+    static $done = false; if ($done) return; $done = true;
+    try { db()->exec("ALTER TABLE books ADD COLUMN profile VARCHAR(20) DEFAULT 'fiction'"); } catch (Exception $e) {}
+    try { db()->exec("UPDATE books SET profile='fiction' WHERE profile IS NULL OR profile=''"); } catch (Exception $e) {}
+}
 function get_books() {
+    ensure_book_profile();
     $rows = all("SELECT * FROM books ORDER BY sort_order, title");
     foreach ($rows as &$b) $b = decorate_book($b);
     return $rows;
 }
 function get_book($id) {
+    ensure_book_profile();
     $b = one("SELECT * FROM books WHERE id=?", [$id]);
     return $b ? decorate_book($b) : null;
 }
+/** Raw profile id for a book (default 'fiction'). Cheap; used where only the
+ *  profile is needed (e.g. the POST handlers that work from a book id string). */
+function book_profile($book_id) {
+    ensure_book_profile();
+    return normalize_profile(val("SELECT profile FROM books WHERE id=?", [$book_id]) ?: 'fiction');
+}
+/** Set a book's profile (validated to a known profile id). */
+function set_book_profile($book_id, $profile) {
+    ensure_book_profile();
+    q("UPDATE books SET profile=? WHERE id=?", [normalize_profile($profile), $book_id]);
+}
 function decorate_book($b) {
     $id = $b['id'];
+    $b['profile'] = normalize_profile($b['profile'] ?? 'fiction');
     $b['entryCount']   = (int) val("SELECT COUNT(*) FROM entries WHERE book_id=?", [$id]);
     $b['chapterCount'] = (int) val("SELECT COUNT(*) FROM chapters WHERE book_id=? AND status<>'archived'", [$id]);
     $b['wordCount']    = (int) val("SELECT COALESCE(SUM(word_count),0) FROM chapters WHERE book_id=? AND status<>'archived'", [$id]);
@@ -24,6 +46,7 @@ function decorate_book($b) {
     return $b;
 }
 function save_book($d) {
+    ensure_book_profile();
     $exists = one("SELECT id FROM books WHERE id=?", [$d['id']]);
     if ($exists) {
         q("UPDATE books SET folder=?,title=?,series=?,num=?,status=?,logline=?,genre=?,word_target=?,dot=?,sort_order=?
@@ -31,11 +54,15 @@ function save_book($d) {
           [$d['folder'],$d['title'],$d['series']??'',$d['num']??'',$d['status']??'planning',
            $d['logline']??'',$d['genre']??'',$d['word_target']??'',$d['dot']??'#4A4391',$d['sort_order']??0,$d['id']]);
     } else {
-        q("INSERT INTO books (id,folder,title,series,num,status,logline,genre,word_target,dot,sort_order)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        q("INSERT INTO books (id,folder,title,series,num,status,logline,genre,word_target,dot,sort_order,profile)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
           [$d['id'],$d['folder'],$d['title'],$d['series']??'',$d['num']??'',$d['status']??'planning',
-           $d['logline']??'',$d['genre']??'',$d['word_target']??'',$d['dot']??'#4A4391',$d['sort_order']??0]);
+           $d['logline']??'',$d['genre']??'',$d['word_target']??'',$d['dot']??'#4A4391',$d['sort_order']??0,
+           normalize_profile($d['profile'] ?? 'fiction')]);
     }
+    // Profile is only written when explicitly supplied, so a folder sync (which
+    // never sends a profile) can't reset an author's choice back to fiction.
+    if (isset($d['profile'])) set_book_profile($d['id'], $d['profile']);
 }
 function book_id_for_folder($folder) {
     return val("SELECT id FROM books WHERE folder=?", [$folder]);
@@ -79,7 +106,8 @@ function entry_to_struct($row) {
     ];
 }
 function save_entry($book_id, $db, $e) {
-    $detail_label = DBMETA[$db]['detailLabel'];
+    $meta = dbmeta($db);
+    $detail_label = $meta['detailLabel'];
     $detail = ''; $first_app = '';
     foreach (($e['fields'] ?? []) as $f) {
         if (strtolower($f['label']) === strtolower($detail_label)) $detail = $f['value'];
@@ -91,12 +119,12 @@ function save_entry($book_id, $db, $e) {
         if ($row) {
             $eid = $row['id'];
             q("UPDATE entries SET name=?,status=?,type=?,detail=?,detail_label=?,first_app=?,related_raw=? WHERE id=?",
-              [$e['name'], $e['status'] ?? 'seed', $e['type'] ?? DBMETA[$db]['singular'],
+              [$e['name'], $e['status'] ?? 'seed', $e['type'] ?? $meta['singular'],
                $detail, $detail_label, $first_app, $e['relatedRaw'] ?? null, $eid]);
         } else {
             q("INSERT INTO entries (book_id,db_key,slug,name,status,type,detail,detail_label,first_app,related_raw)
                VALUES (?,?,?,?,?,?,?,?,?,?)",
-              [$book_id, $db, $e['slug'], $e['name'], $e['status'] ?? 'seed', $e['type'] ?? DBMETA[$db]['singular'],
+              [$book_id, $db, $e['slug'], $e['name'], $e['status'] ?? 'seed', $e['type'] ?? $meta['singular'],
                $detail, $detail_label, $first_app, $e['relatedRaw'] ?? null]);
             $eid = last_id();
         }

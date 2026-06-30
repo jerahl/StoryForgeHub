@@ -9,8 +9,11 @@ $env = function ($key, $default = '') {
 };
 
 return [
-    // --- MySQL --- (Wasmer-managed DB env vars)
+    // --- DB --- defaults to Wasmer-managed MySQL. Set DB_DRIVER=sqlite (+ DB_PATH)
+    // for local dev/tests; db.php already speaks both. Production is unaffected.
     'db' => [
+        'driver'  => $env('DB_DRIVER', 'mysql'),
+        'path'    => $env('DB_PATH', __DIR__ . '/codex.sqlite'),
         'host'    => $env('DB_HOST', '127.0.0.1'),
         'port'    => (int) $env('DB_PORT', '3306'),
         'name'    => $env('DB_NAME', 'codex'),

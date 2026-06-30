@@ -52,7 +52,7 @@ function migrate() {
 "books" => "(
   id VARCHAR(40) NOT NULL PRIMARY KEY, folder VARCHAR(120) NOT NULL, title VARCHAR(255) NOT NULL,
   series VARCHAR(160) DEFAULT '', num VARCHAR(10) DEFAULT '', status VARCHAR(20) DEFAULT 'planning',
-  logline TEXT, genre VARCHAR(255) DEFAULT '', word_target VARCHAR(20) DEFAULT '',
+  profile VARCHAR(20) DEFAULT 'fiction', logline TEXT, genre VARCHAR(255) DEFAULT '', word_target VARCHAR(20) DEFAULT '',
   dot VARCHAR(10) DEFAULT '#4A4391', sort_order INT DEFAULT 0, updated_at $now )",
 "entries" => "(
   id $pk, book_id VARCHAR(40) NOT NULL, db_key VARCHAR(20) NOT NULL, slug VARCHAR(160) NOT NULL,
@@ -97,6 +97,7 @@ function migrate() {
         "ALTER TABLE chapters ADD COLUMN body MEDIUMTEXT",
         "ALTER TABLE tasks ADD COLUMN priority VARCHAR(10) DEFAULT 'med'",
         "ALTER TABLE tasks ADD COLUMN due VARCHAR(20) DEFAULT 'someday'",
+        "ALTER TABLE books ADD COLUMN profile VARCHAR(20) DEFAULT 'fiction'",   // Phase 10 book profiles
     ] as $s) {
         try { db()->exec($s); } catch (Exception $e) {}
     }

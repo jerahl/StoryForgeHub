@@ -163,7 +163,7 @@ function render_sidebar($book, $active, $activeDb = null) {
       <?php if ($book): $bid=$book['id']; ?>
       <div class="navgroup"><?=e($book['title'])?></div>
       <a class="navitem <?= $active==='book'?'active':'' ?>" href="<?=url(['p'=>'book','book'=>$bid])?>"><span class="dot" style="background:<?=e($book['dot'])?>"></span>Home</a>
-      <?php foreach (DB_KEYS as $k): $m=DBMETA[$k]; $c=(int)val("SELECT COUNT(*) FROM entries WHERE book_id=? AND db_key=?",[$bid,$k]); ?>
+      <?php $bprofile = $book['profile'] ?? 'fiction'; foreach (db_keys_for($bprofile) as $k): $m=dbmeta($k,$bprofile); $c=(int)val("SELECT COUNT(*) FROM entries WHERE book_id=? AND db_key=?",[$bid,$k]); ?>
         <a class="navitem <?= ($active==='db'&&$activeDb===$k)?'active':'' ?>" href="<?=url(['p'=>'db','book'=>$bid,'db'=>$k])?>">
           <span class="sq" style="background:<?=$m['hue']?>"></span><?=$m['title']?><span class="count"><?=$c?></span></a>
       <?php endforeach ?>
