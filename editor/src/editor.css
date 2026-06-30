@@ -1,0 +1,19 @@
+/* Codex TipTap editor (Phase 4) */
+.codex-meta{display:grid;gap:8px;margin-bottom:14px}
+.codex-meta .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.codex-meta label{font-size:12px;color:var(--faint,#888);min-width:64px}
+.codex-meta input,.codex-meta select{font:inherit;padding:6px 9px;border:1px solid var(--line2,#ccc);border-radius:7px;background:var(--panel,#fff);color:var(--ink,#222)}
+.field-row{display:flex;gap:8px;align-items:center}
+.field-row .fk{flex:0 0 160px}
+.field-row .fv{flex:1;min-width:160px}
+#codex-prose{border:1px solid var(--line2,#ccc);border-radius:10px;padding:12px 14px;background:var(--panel,#fff);min-height:300px}
+#codex-prose .ProseMirror{outline:none;min-height:280px;line-height:1.55}
+#codex-prose .ProseMirror:focus{outline:none}
+#codex-prose h2{font-size:16px;font-weight:600;margin:18px 0 6px}
+#codex-prose h3{font-size:14px;font-weight:600;margin:14px 0 4px}
+#codex-prose p{margin:0 0 10px}
+#codex-prose ul,#codex-prose ol{margin:0 0 10px 22px}
+#codex-prose .ProseMirror p.is-editor-empty:first-child::before{content:attr(data-placeholder);color:var(--faint,#aaa);float:left;height:0;pointer-events:none}
+/* live mention highlight (Phase 5) — recognized names; click to link as [[slug]] */
+#codex-prose .cm-mention{border-bottom:1px dashed var(--accent,#5b7);cursor:pointer}
+#codex-prose .cm-mention:hover{background:color-mix(in srgb,var(--accent,#5b7) 14%,transparent)}
