@@ -1,0 +1,372 @@
+<?php
+/** repo.php — data access + sync logic (import / push / pull / apply). */
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/md.php';
+
+/* ----------------------------------------------------------------- books */
+function get_books() {
+    $rows = all("SELECT * FROM books ORDER BY sort_order, title");
+    foreach ($rows as &$b) $b = decorate_book($b);
+    return $rows;
+}
+function get_book($id) {
+    $b = one("SELECT * FROM books WHERE id=?", [$id]);
+    return $b ? decorate_book($b) : null;
+}
+function decorate_book($b) {
+    $id = $b['id'];
+    $b['entryCount']   = (int) val("SELECT COUNT(*) FROM entries WHERE book_id=?", [$id]);
+    $b['chapterCount'] = (int) val("SELECT COUNT(*) FROM chapters WHERE book_id=?", [$id]);
+    $b['wordCount']    = (int) val("SELECT COALESCE(SUM(word_count),0) FROM chapters WHERE book_id=?", [$id]);
+    $b['threadCount']  = (int) val("SELECT COUNT(*) FROM threads WHERE book_id=? AND status='open'", [$id]);
+    $b['taskCount']    = (int) val("SELECT COUNT(*) FROM tasks WHERE book_id=? AND status<>'done'", [$id]);
+    return $b;
+}
+function save_book($d) {
+    $exists = one("SELECT id FROM books WHERE id=?", [$d['id']]);
+    if ($exists) {
+        q("UPDATE books SET folder=?,title=?,series=?,num=?,status=?,logline=?,genre=?,word_target=?,dot=?,sort_order=?
+           WHERE id=?",
+          [$d['folder'],$d['title'],$d['series']??'',$d['num']??'',$d['status']??'planning',
+           $d['logline']??'',$d['genre']??'',$d['word_target']??'',$d['dot']??'#4A4391',$d['sort_order']??0,$d['id']]);
+    } else {
+        q("INSERT INTO books (id,folder,title,series,num,status,logline,genre,word_target,dot,sort_order)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+          [$d['id'],$d['folder'],$d['title'],$d['series']??'',$d['num']??'',$d['status']??'planning',
+           $d['logline']??'',$d['genre']??'',$d['word_target']??'',$d['dot']??'#4A4391',$d['sort_order']??0]);
+    }
+}
+function book_id_for_folder($folder) {
+    return val("SELECT id FROM books WHERE folder=?", [$folder]);
+}
+
+/* --------------------------------------------------------------- entries */
+function get_entries($book_id, $db = null) {
+    if ($db) return all("SELECT * FROM entries WHERE book_id=? AND db_key=? ORDER BY name", [$book_id, $db]);
+    return all("SELECT * FROM entries WHERE book_id=? ORDER BY db_key, name", [$book_id]);
+}
+function get_entry($book_id, $db, $slug) {
+    $row = one("SELECT * FROM entries WHERE book_id=? AND db_key=? AND slug=?", [$book_id, $db, $slug]);
+    if (!$row) return null;
+    return entry_to_struct($row);
+}
+function get_entry_by_id($id) {
+    $row = one("SELECT * FROM entries WHERE id=?", [$id]);
+    return $row ? entry_to_struct($row) : null;
+}
+function entry_to_struct($row) {
+    $eid = $row['id'];
+    $fields = all("SELECT label,value FROM entry_fields WHERE entry_id=? ORDER BY sort_order", [$eid]);
+    $secs   = all("SELECT heading AS h, body FROM entry_sections WHERE entry_id=? ORDER BY sort_order", [$eid]);
+    $rels   = array_column(all("SELECT target_slug FROM entry_relations WHERE entry_id=? ORDER BY sort_order", [$eid]), 'target_slug');
+    $threads = []; $sources = [];
+    foreach ($secs as $s) {
+        $hl = strtolower($s['h']);
+        if ($hl === 'open threads' || $hl === 'threads') {
+            foreach (explode("\n", $s['body']) as $b) {
+                $b = trim($b);
+                if ($b !== '' && ($b[0] === '-' || $b[0] === '*')) $threads[] = trim(preg_replace('/^[-*]\s+/', '', $b));
+            }
+        }
+    }
+    return [
+        'id' => $eid, 'slug' => $row['slug'], 'name' => $row['name'], 'db' => $row['db_key'],
+        'status' => $row['status'], 'type' => $row['type'],
+        'detail' => $row['detail'], 'detailLabel' => $row['detail_label'], 'firstApp' => $row['first_app'],
+        'fields' => $fields, 'related' => $rels, 'relatedRaw' => $row['related_raw'],
+        'sections' => $secs, 'threads' => $threads, 'sources' => $sources,
+    ];
+}
+function save_entry($book_id, $db, $e) {
+    $detail_label = DBMETA[$db]['detailLabel'];
+    $detail = ''; $first_app = '';
+    foreach (($e['fields'] ?? []) as $f) {
+        if (strtolower($f['label']) === strtolower($detail_label)) $detail = $f['value'];
+        if (strtolower($f['label']) === 'first appearance') $first_app = $f['value'];
+    }
+    $pdo = db(); $pdo->beginTransaction();
+    try {
+        $row = one("SELECT id FROM entries WHERE book_id=? AND db_key=? AND slug=?", [$book_id, $db, $e['slug']]);
+        if ($row) {
+            $eid = $row['id'];
+            q("UPDATE entries SET name=?,status=?,type=?,detail=?,detail_label=?,first_app=?,related_raw=? WHERE id=?",
+              [$e['name'], $e['status'] ?? 'seed', $e['type'] ?? DBMETA[$db]['singular'],
+               $detail, $detail_label, $first_app, $e['relatedRaw'] ?? null, $eid]);
+        } else {
+            q("INSERT INTO entries (book_id,db_key,slug,name,status,type,detail,detail_label,first_app,related_raw)
+               VALUES (?,?,?,?,?,?,?,?,?,?)",
+              [$book_id, $db, $e['slug'], $e['name'], $e['status'] ?? 'seed', $e['type'] ?? DBMETA[$db]['singular'],
+               $detail, $detail_label, $first_app, $e['relatedRaw'] ?? null]);
+            $eid = last_id();
+        }
+        q("DELETE FROM entry_fields WHERE entry_id=?", [$eid]);
+        q("DELETE FROM entry_sections WHERE entry_id=?", [$eid]);
+        q("DELETE FROM entry_relations WHERE entry_id=?", [$eid]);
+        $i = 0;
+        foreach (($e['fields'] ?? []) as $f)
+            q("INSERT INTO entry_fields (entry_id,label,value,sort_order) VALUES (?,?,?,?)",
+              [$eid, $f['label'], $f['value'], $i++]);
+        $i = 0;
+        foreach (($e['sections'] ?? []) as $s)
+            q("INSERT INTO entry_sections (entry_id,heading,body,sort_order) VALUES (?,?,?,?)",
+              [$eid, $s['h'], $s['body'], $i++]);
+        $i = 0;
+        foreach (($e['related'] ?? []) as $r)
+            q("INSERT INTO entry_relations (entry_id,target_slug,sort_order) VALUES (?,?,?)", [$eid, $r, $i++]);
+        $pdo->commit();
+        return $eid;
+    } catch (Exception $ex) { $pdo->rollBack(); throw $ex; }
+}
+function delete_entry($book_id, $db, $slug) {
+    $row = one("SELECT id FROM entries WHERE book_id=? AND db_key=? AND slug=?", [$book_id, $db, $slug]);
+    if (!$row) return;
+    $eid = $row['id'];
+    foreach (['entry_fields','entry_sections','entry_relations'] as $t) q("DELETE FROM $t WHERE entry_id=?", [$eid]);
+    q("DELETE FROM entries WHERE id=?", [$eid]);
+}
+function entry_render_md($book_id, $db, $slug) {
+    $e = get_entry($book_id, $db, $slug);
+    return $e ? md_render_entry($e) : null;
+}
+
+/* ------------------------------------------------------ chapters / prog */
+function get_chapters($book_id) { return all("SELECT id,book_id,num,title,pov,status,words,word_count,summary,file,sort_order FROM chapters WHERE book_id=? ORDER BY sort_order, num, file", [$book_id]); }
+function get_chapter($id) { return one("SELECT * FROM chapters WHERE id=?", [$id]); }
+function set_chapter_status($id, $status) {
+    $ok = ['outline','drafted','revised'];
+    if (in_array($status, $ok, true)) q("UPDATE chapters SET status=? WHERE id=?", [$status, $id]);
+}
+function get_progressions($book_id) { return all("SELECT * FROM progressions WHERE book_id=? ORDER BY sort_order, id", [$book_id]); }
+function get_threads($book_id, $status = null) {
+    if ($status) return all("SELECT * FROM threads WHERE book_id=? AND status=? ORDER BY db_key, entry_name", [$book_id, $status]);
+    return all("SELECT * FROM threads WHERE book_id=? ORDER BY status, db_key, entry_name", [$book_id]);
+}
+function set_thread_status($id, $status) { q("UPDATE threads SET status=? WHERE id=?", [$status, $id]); }
+
+/* rebuild threads from entries' Open Threads sections */
+function rebuild_threads($book_id) {
+    // preserve manually-resolved threads by text
+    $resolved = array_column(all("SELECT text FROM threads WHERE book_id=? AND status='resolved'", [$book_id]), 'text');
+    q("DELETE FROM threads WHERE book_id=?", [$book_id]);
+    $i = 0;
+    foreach (get_entries($book_id) as $row) {
+        $e = entry_to_struct($row);
+        foreach ($e['threads'] as $t) {
+            $st = in_array($t, $resolved) ? 'resolved' : 'open';
+            q("INSERT INTO threads (book_id,entry_slug,entry_name,db_key,status,text,sort_order) VALUES (?,?,?,?,?,?,?)",
+              [$book_id, $e['slug'], $e['name'], $e['db'], $st, $t, $i++]);
+        }
+    }
+}
+
+/* --------------------------------------------------------------- meta */
+function get_meta($book_id) { return all("SELECT * FROM meta_pages WHERE book_id=? ORDER BY title", [$book_id]); }
+function get_meta_page($book_id, $slug) { return one("SELECT * FROM meta_pages WHERE book_id=? AND slug=?", [$book_id, $slug]); }
+function save_meta_page($book_id, $slug, $title, $body) {
+    $e = get_meta_page($book_id, $slug);
+    if ($e) q("UPDATE meta_pages SET title=?,body=? WHERE book_id=? AND slug=?", [$title, $body, $book_id, $slug]);
+    else    q("INSERT INTO meta_pages (book_id,slug,title,body) VALUES (?,?,?,?)", [$book_id, $slug, $title, $body]);
+}
+
+/* --------------------------------------------------------------- tasks */
+function get_tasks($book_id = null, $filters = []) {
+    $w = []; $p = [];
+    if ($book_id) { $w[] = 'book_id=?'; $p[] = $book_id; }
+    if (isset($filters['for_claude'])) { $w[] = 'for_claude=?'; $p[] = $filters['for_claude'] ? 1 : 0; }
+    if (isset($filters['status']))     { $w[] = 'status=?';     $p[] = $filters['status']; }
+    $sql = "SELECT * FROM tasks" . ($w ? " WHERE " . implode(' AND ', $w) : "") . " ORDER BY status, updated_at DESC";
+    return all($sql, $p);
+}
+function get_task($id) { return one("SELECT * FROM tasks WHERE id=?", [$id]); }
+function save_task($d) {
+    if (!empty($d['id'])) {
+        q("UPDATE tasks SET title=?,body=?,status=?,for_claude=?,target_db=?,target_slug=?,result=? WHERE id=?",
+          [$d['title'],$d['body']??'',$d['status']??'todo',!empty($d['for_claude'])?1:0,
+           $d['target_db']??'',$d['target_slug']??'',$d['result']??'',$d['id']]);
+        return $d['id'];
+    }
+    q("INSERT INTO tasks (book_id,title,body,status,for_claude,target_db,target_slug,result) VALUES (?,?,?,?,?,?,?,?)",
+      [$d['book_id'],$d['title'],$d['body']??'',$d['status']??'todo',!empty($d['for_claude'])?1:0,
+       $d['target_db']??'',$d['target_slug']??'',$d['result']??'']);
+    return last_id();
+}
+function delete_task($id) { q("DELETE FROM tasks WHERE id=?", [$id]); }
+
+/* ----------------------------------------------------------- writing log */
+function get_writing_log($book_id = null) {
+    if ($book_id) return all("SELECT * FROM writing_log WHERE book_id=? ORDER BY log_date DESC, id DESC", [$book_id]);
+    return all("SELECT * FROM writing_log ORDER BY log_date DESC, id DESC");
+}
+function add_writing_log($d) {
+    q("INSERT INTO writing_log (book_id,log_date,words_added,total_words,chapters,minutes,mood,note,source)
+       VALUES (?,?,?,?,?,?,?,?,?)",
+      [$d['book_id'],$d['log_date'],$d['words_added']??0,$d['total_words']??0,$d['chapters']??'',
+       $d['minutes']??0,$d['mood']??'',$d['note']??'',$d['source']??'manual']);
+    return last_id();
+}
+
+/* ----------------------------------------------------------- sync_state */
+function sync_get($book_id, $k) { return val("SELECT v FROM sync_state WHERE book_id=? AND k=?", [$book_id, $k]); }
+function sync_set($book_id, $k, $v) {
+    if (val("SELECT id FROM sync_state WHERE book_id=? AND k=?", [$book_id, $k]) !== null)
+        q("UPDATE sync_state SET v=? WHERE book_id=? AND k=?", [$v, $book_id, $k]);
+    else q("INSERT INTO sync_state (book_id,k,v) VALUES (?,?,?)", [$book_id, $k, $v]);
+}
+
+/* ===================================================== SYNC: import snap */
+/** Load a canonical snapshot (from codex_sync_lib.snapshot) into the DB. */
+function import_snapshot($snap) {
+    migrate(); // ensure tables/columns exist (lets no-shell hosts seed via the website)
+    foreach ($snap['books'] as $bk) {
+        $b = $bk['book'];
+        save_book([
+            'id'=>$b['id'],'folder'=>$b['folder'],'title'=>$b['title'],'series'=>$b['series']??'',
+            'num'=>$b['num']??'','status'=>$b['status']??'planning','logline'=>$b['logline']??'',
+            'genre'=>$b['genre']??'','word_target'=>$b['wordTarget']??($b['word_target']??''),
+            'dot'=>$b['dot']??'#4A4391','sort_order'=>$b['sort_order']??0,
+        ]);
+        $bid = $b['id'];
+        foreach ($bk['entries'] as $e) {
+            if (!empty($e['error'])) continue;
+            save_entry($bid, $e['db'], $e);
+        }
+        // chapters — preserve any statuses already set in the app across a re-import
+        $prevStatus = [];
+        foreach (all("SELECT file,status FROM chapters WHERE book_id=?", [$bid]) as $r) $prevStatus[$r['file']] = $r['status'];
+        q("DELETE FROM chapters WHERE book_id=?", [$bid]);
+        $i = 0;
+        foreach ($bk['chapters'] as $c) {
+            $st = $prevStatus[$c['file'] ?? ''] ?? ($c['status'] ?? 'drafted');
+            q("INSERT INTO chapters (book_id,num,title,pov,status,words,word_count,summary,body,file,sort_order)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+              [$bid,$c['num'],$c['title'],$c['pov']??'',$st,$c['words']??'',
+               $c['wordCount']??0,$c['summary']??'',$c['body']??'',$c['file']??'',$i++]);
+        }
+        // progressions
+        q("DELETE FROM progressions WHERE book_id=?", [$bid]);
+        $i = 0;
+        foreach ($bk['progressions'] as $pr)
+            q("INSERT INTO progressions (book_id,chapter,type,what,related_csv,sort_order) VALUES (?,?,?,?,?,?)",
+              [$bid,$pr['chapter'],$pr['type']??'turn',$pr['what'],implode(',', $pr['related']??[]),$i++]);
+        // meta
+        foreach ($bk['meta'] as $mp) save_meta_page($bid, $mp['slug'], $mp['title'], $mp['body']);
+        rebuild_threads($bid);
+    }
+}
+
+/* ===================================================== SYNC: push files */
+/** payload: { books: [ {folder, files:{relpath: content}} ] }  (folder -> web) */
+function push_files($payload) {
+    $report = ['entries'=>0,'chapters'=>0,'meta'=>0,'progressions'=>0,'skipped'=>0,'books'=>[]];
+    $folder_re = '#^Codex/(' . implode('|', array_map(function($k){return DBMETA[$k]['folder'];}, DB_KEYS)) . ')/(.+)\.md$#';
+    $db_by_folder = [];
+    foreach (DB_KEYS as $k) $db_by_folder[DBMETA[$k]['folder']] = $k;
+
+    foreach ($payload['books'] as $bk) {
+        $bid = book_id_for_folder($bk['folder']);
+        if (!$bid) { $report['skipped'] += count($bk['files'] ?? []); continue; }
+        $touched = 0;
+        foreach (($bk['files'] ?? []) as $rel => $content) {
+            $rel = str_replace('\\', '/', $rel);
+            $base = strtolower(basename($rel));
+            if (preg_match($folder_re, $rel, $m)) {
+                $folder = $m[1]; $slug = $m[2];
+                if ($base === 'index.md' || strpos($base,'template')!==false || $base[0]==='_') { continue; }
+                $db = $db_by_folder[$folder];
+                $e = md_parse_entry($content, $db, $slug);
+                if (!$e['slug']) $e['slug'] = $slug;
+                save_entry($bid, $db, $e);
+                $report['entries']++; $touched++;
+            } elseif (preg_match('#^Manuscript/(.+\.md)$#', $rel, $m)) {
+                upsert_chapter_from_md($bid, $m[1], $content);
+                $report['chapters']++;
+            } elseif (preg_match('#^Codex/Meta/progressions\.md$#', $rel)) {
+                import_progressions_md($bid, $content);
+                $report['progressions']++;
+            } elseif (preg_match('#^Codex/Meta/(.+)\.md$#', $rel, $m)) {
+                $slug = $m[1];
+                $title = ucfirst(str_replace('-', ' ', $slug));
+                save_meta_page($bid, $slug, $title, $content);
+                $report['meta']++;
+            }
+        }
+        rebuild_threads($bid);
+        $report['books'][$bk['folder']] = $touched;
+    }
+    return $report;
+}
+function upsert_chapter_from_md($book_id, $file, $content) {
+    $content = str_replace("\x00", '', $content);
+    $base = preg_replace('/\.md$/', '', $file);
+    $num = '';
+    if (preg_match('/(\d+)/', $base, $m)) $num = str_pad($m[1], 2, '0', STR_PAD_LEFT);
+    $title = ucwords(str_replace('_', ' ', $base));
+    if (preg_match('/^#{2,3}\s*Chapter[^\n\x{2014}-]*[\x{2014}-]\s*(.+?)\s*$/mu', $content, $m)) {
+        $title = trim(preg_replace('/\*?\(.*?\)\*?/', '', $m[1]), " *");
+    } elseif (stripos($base, 'prologue') === 0) { $title = 'Prologue'; }
+    $wc = md_word_count($content);
+    $words = number_format($wc);
+    $row = one("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book_id, $file]);
+    // Update content + counts but never touch the app-managed status.
+    if ($row) q("UPDATE chapters SET num=?,title=?,words=?,word_count=?,body=? WHERE id=?", [$num ?: $base, $title, $words, $wc, $content, $row['id']]);
+    else q("INSERT INTO chapters (book_id,num,title,status,words,word_count,body,file,sort_order) VALUES (?,?,?,?,?,?,?,?,?)",
+           [$book_id, $num ?: $base, $title, 'drafted', $words, $wc, $content, $file, $wc]);
+}
+function import_progressions_md($book_id, $content) {
+    $content = str_replace("\x00", '', $content);
+    q("DELETE FROM progressions WHERE book_id=?", [$book_id]);
+    $i = 0;
+    foreach (explode("\n", $content) as $ln) {
+        if (preg_match('/^- \*\*(Ch\.?\s*[\dA-Za-z\x{2013}\x{2014}-]+[^:*]*?)\:\*\*\s*(.+)$/u', trim($ln), $m)) {
+            $chapter = trim($m[1]);
+            $raw = $m[2];
+            $what = trim(preg_replace('/\[\[([^\]]+)\]\]/', '$1', $raw));
+            preg_match_all('/\[\[([^\]]+)\]\]/', $raw, $lm);
+            $wl = strtolower($what); $type = 'turn';
+            if (strpos($wl,'introduc')!==false || strpos($wl,'first on-page')!==false) $type='intro';
+            elseif (strpos($wl,'death')!==false || strpos($wl,'executed')!==false || strpos($wl,'destroyed')!==false) $type='death';
+            q("INSERT INTO progressions (book_id,chapter,type,what,related_csv,sort_order) VALUES (?,?,?,?,?,?)",
+              [$book_id, $chapter, $type, $what, implode(',', $lm[1]), $i++]);
+        }
+    }
+}
+
+/* ===================================================== SYNC: pull files */
+/** Return { books: [ {folder, files:{relpath: rendered_md}} ] }  (web -> folder).
+ *  Entries only — manuscript prose and hand-authored notes stay folder-owned. */
+function pull_files($book_id = null) {
+    $books = $book_id ? [get_book($book_id)] : get_books();
+    $out = [];
+    foreach ($books as $b) {
+        if (!$b) continue;
+        $files = [];
+        foreach (get_entries($b['id']) as $row) {
+            $e = entry_to_struct($row);
+            $folder = DBMETA[$e['db']]['folder'];
+            $files["Codex/$folder/{$e['slug']}.md"] = md_render_entry($e);
+        }
+        $out[] = ['folder' => $b['folder'], 'files' => $files];
+    }
+    return ['books' => $out];
+}
+
+/* ===================================================== SYNC: apply (skill outbox -> web) */
+/** payload: { task_results:[{id,status,result}], writing_log:[{...}], thread_status:[{id,status}] } */
+function apply_results($payload) {
+    $report = ['tasks'=>0,'writing_log'=>0,'threads'=>0];
+    foreach (($payload['task_results'] ?? []) as $tr) {
+        $t = get_task($tr['id']); if (!$t) continue;
+        q("UPDATE tasks SET status=?, result=? WHERE id=?",
+          [$tr['status'] ?? 'done', $tr['result'] ?? $t['result'], $tr['id']]);
+        $report['tasks']++;
+    }
+    foreach (($payload['writing_log'] ?? []) as $wl) {
+        $wl['source'] = $wl['source'] ?? 'claude';
+        add_writing_log($wl);
+        $report['writing_log']++;
+    }
+    foreach (($payload['thread_status'] ?? []) as $ts) {
+        set_thread_status($ts['id'], $ts['status']); $report['threads']++;
+    }
+    return $report;
+}

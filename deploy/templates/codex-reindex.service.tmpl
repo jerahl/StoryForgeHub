@@ -1,0 +1,16 @@
+# codex-reindex.service — nightly mentions/diagnostics reindex (MASTER-PLAN P5/P7).
+# Staged but not enabled until P5 lands index_mentions(). Refreshes the derived
+# mentions/prose_analysis caches server-side beyond the on-save pass.
+[Unit]
+Description=Stephen's Codex nightly reindex (mentions + diagnostics)
+After=mariadb.service
+
+[Service]
+Type=oneshot
+User=${CODEX_ADMIN_USER}
+Group=www-data
+EnvironmentFile=${CODEX_ENV_FILE}
+WorkingDirectory=${CODEX_APP_ROOT}
+# Reindex runs through the PHP app (single DB-writer path).
+ExecStart=/usr/bin/php${PHP_VERSION} ${CODEX_APP_ROOT}/bin/reindex.php
+NoNewPrivileges=true

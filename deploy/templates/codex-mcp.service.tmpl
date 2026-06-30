@@ -1,0 +1,28 @@
+# codex-mcp.service — always-on remote MCP tool surface (MASTER-PLAN Phase 3).
+# Streamable-HTTP MCP on loopback 127.0.0.1:8765; Caddy fronts it at /mcp with a
+# bearer token. Runs under a venv (mcp + uvicorn) created by 04-configure.sh.
+[Unit]
+Description=Stephen's Codex MCP service (remote tools)
+After=network-online.target mariadb.service php${PHP_VERSION}-fpm.service caddy.service
+Wants=network-online.target caddy.service
+
+[Service]
+Type=simple
+User=${CODEX_ADMIN_USER}
+Group=www-data
+EnvironmentFile=${CODEX_ENV_FILE}
+Environment=CODEX_BOOKS_DIR=${CODEX_BOOKS_DIR}
+Environment=CODEX_API_URL=http://127.0.0.1:8081/api.php
+WorkingDirectory=${CODEX_ENGINE_DIR}
+ExecStart=${CODEX_ENGINE_DIR}/.venv/bin/python ${CODEX_ENGINE_DIR}/mcp_server.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=codex
+ReadWritePaths=${CODEX_BOOKS_DIR}
+
+[Install]
+WantedBy=multi-user.target

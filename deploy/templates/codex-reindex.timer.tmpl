@@ -1,0 +1,11 @@
+# codex-reindex.timer — nightly reindex (MASTER-PLAN P5/P7).
+[Unit]
+Description=Run Codex reindex nightly
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

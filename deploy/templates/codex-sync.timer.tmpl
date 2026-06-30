@@ -1,0 +1,13 @@
+# codex-sync.timer — runs codex-sync.service every ${SYNC_INTERVAL_MIN} minutes.
+# The always-on replacement for the Windows scheduled task (MASTER-PLAN P3).
+[Unit]
+Description=Run Codex reconcile every ${SYNC_INTERVAL_MIN} min
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=${SYNC_INTERVAL_MIN}min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,40 @@
+# nginx vhost for Stephen's Codex — used only when WEB_SERVER=nginx.
+# Rendered by 04-configure.sh into /etc/nginx/sites-available/codex.
+# Run certbot afterwards:  certbot --nginx -d ${CODEX_DOMAIN}
+# (certbot rewrites this file to add the 443 server + redirect.)
+
+server {
+	listen 80;
+	listen [::]:80;
+	server_name ${CODEX_DOMAIN};
+	# Docroot is the htdocs/ subfolder — app internals (src/, config.php,
+	# schema.sql, bin/, sync/) live ABOVE it and are unreachable over HTTP.
+	root ${CODEX_DOCROOT};
+	index index.php;
+
+	# Defense in depth (internals are already outside the docroot).
+	location ~ ^/(config\.php|config\.sample\.php|schema\.sql)$ { return 404; }
+	location ~ ^/(src|bin|sync)/ { return 404; }
+	location ~ \.(sql|bak)$ { return 404; }
+	location ~ \.bak- { return 404; }
+
+	# MCP reverse proxy (Phase 3) — uncomment once codex-mcp is live.
+	# location /mcp/ {
+	# 	proxy_pass http://127.0.0.1:8765/;
+	# 	proxy_set_header Host $host;
+	# 	proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+	# 	proxy_set_header X-Forwarded-Proto $scheme;
+	# }
+
+	location / {
+		try_files $uri $uri/ /index.php?$query_string;
+	}
+
+	location ~ \.php$ {
+		include snippets/fastcgi-php.conf;
+		fastcgi_pass unix:/run/php/php${PHP_VERSION}-fpm-codex.sock;
+	}
+
+	access_log /var/log/nginx/codex-access.log;
+	error_log  /var/log/nginx/codex-error.log;
+}

@@ -1,0 +1,42 @@
+# Caddyfile for Stephen's Codex — rendered by 04-configure.sh into /etc/caddy/Caddyfile.
+# Placeholders ${...} are substituted from deploy.env / lib.sh defaults.
+# Caddy obtains and renews TLS automatically for ${CODEX_DOMAIN}.
+
+# Shared app handling (used by the public HTTPS site and the loopback site).
+(codex_app) {
+	root * ${CODEX_DOCROOT}
+	@denied path /config.php /config.sample.php /schema.sql /src/* /bin/* /sync/* *.sql *.bak *.bak-*
+	handle @denied {
+		respond 404
+	}
+	handle {
+		php_fastcgi unix//run/php/php${PHP_VERSION}-fpm-codex.sock
+		file_server
+	}
+}
+
+# --- public site: auto-HTTPS on the real hostname ---
+${CODEX_DOMAIN} {
+	encode zstd gzip
+
+	# MCP remote tool surface (Phase 3): proxy /mcp to the codex-mcp service.
+	# Path is PRESERVED (handle, not handle_path) because the backend serves /mcp.
+	# The codex-mcp service enforces the bearer token itself.
+	@mcp path /mcp /mcp/*
+	handle @mcp {
+		log_skip                    # token rides in ?k=<...>; keep it out of the access log
+		reverse_proxy 127.0.0.1:8765
+	}
+
+	import codex_app
+	log {
+		output file /var/log/caddy/codex-access.log
+		format json
+	}
+}
+
+# --- loopback site: plain HTTP, bound to 127.0.0.1 only (never public) ---
+# The reconcile engine / MCP service call api.php here so writes stay on the box.
+http://127.0.0.1:8081 {
+	import codex_app
+}

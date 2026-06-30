@@ -1,0 +1,5 @@
+# systemd drop-in for php-fpm — injects /etc/codex/codex.env so config.php's
+# getenv() sees DB_*/API_KEY/APP_PASSWORD. Rendered by 04-configure.sh into
+# /etc/systemd/system/php${PHP_VERSION}-fpm.service.d/codex-env.conf
+[Service]
+EnvironmentFile=${CODEX_ENV_FILE}

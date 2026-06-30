@@ -1,0 +1,65 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Beacon Phase 5 preview · Stephen's Codex</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,600&family=Work+Sans:wght@400;450;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css">
+<style>:root{--accent:#7c8cff;--accent-soft:rgba(124,140,255,0.16);--row-pad:12px;--body-font:'Hanken Grotesk',system-ui,sans-serif}</style>
+<style>.previewnote{position:fixed;bottom:12px;right:14px;font:12px var(--mono);color:var(--faint);background:var(--panel);border:1px solid var(--line);padding:6px 10px;border-radius:8px;z-index:300}</style>
+</head><body class="beacon">
+<div class="app">
+  <nav class="side">
+    <div class="brand"><span class="mark">C</span><span class="name">Stephen's Codex</span></div>
+    <a class="navitem" href="#"><span class="dot" style="background:var(--accent)"></span>Overview</a>
+    <div class="navgroup">The Echo Between Stars</div>
+    <a class="navitem" href="#"><span class="sq" style="background:#6c8cff"></span>Characters<span class="count">12</span></a>
+    <div class="navgroup">Work</div>
+    <a class="navitem" href="#"><span class="dot" style="background:#5b54b8"></span>Tasks<span class="count">4</span></a>
+    <a class="navitem" href="#"><span class="dot" style="background:#4F7A52"></span>Writing log</a>
+    <a class="navitem active" href="#"><span class="dot" style="background:#7c8cff"></span>Plot board</a>
+    <a class="navitem" href="#"><span class="dot" style="background:#c98ad6"></span>Mood board</a>
+    <div class="side-foot">
+      <button type="button" class="sprint-start">&#9654; Start a writing sprint</button>
+      <div class="streak-chip"><span class="streak-dot"></span><span class="streak-n">5</span> days streak</div>
+    </div>
+  </nav>
+  <div class="main">
+    <div class="topbar">
+      <div class="bookswitch"><select><option>The Echo Between Stars</option></select></div>
+      <span class="pill drafting">drafting</span>
+      <div class="crumbs"><a href="#">The Echo Between Stars</a><span>›</span><span>Plot board</span></div>
+      <div class="spacer"></div>
+      <form class="capbar" onsubmit="return false"><input type="text" placeholder="Brain dump — capture it, triage later"><button class="btn primary sm">Capture</button></form>
+      <div class="theme"><span>Theme</span><select><option>Beacon</option><option>Light</option></select></div>
+    </div>
+    <div class="content">
+      <div class="pagehead"><div><h1>Plot board</h1><p class="desc">A spatial corkboard. Drag cards around, drag from a card’s dot to another to connect related beats.</p></div></div>
+      <div class="toolbar"><button class="btn primary sm">+ New card</button><span class="muted" style="margin-left:8px">4 cards</span></div>
+      <div class="plot-surface">
+        <svg style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;overflow:visible">
+          <line x1="146" y1="100" x2="446" y2="150" stroke="#7c8cff" stroke-width="2.5" stroke-opacity="0.6" stroke-linecap="round"></line>
+          <line x1="146" y1="100" x2="196" y2="330" stroke="#7c8cff" stroke-width="2.5" stroke-opacity="0.6" stroke-linecap="round"></line>
+          <line x1="446" y1="150" x2="196" y2="330" stroke="#5ec98a" stroke-width="2.5" stroke-opacity="0.6" stroke-linecap="round"></line>
+        </svg>
+        <div class="plot-card" style="left:40px;top:40px">
+          <div class="plot-card-h" style="background:#7c8cff22"><span class="plot-dot" style="background:#7c8cff"></span><span class="plot-grab">drag</span><span class="plot-link" style="border-color:#7c8cff"><i style="background:#7c8cff"></i></span><span class="plot-del">&times;</span></div>
+          <textarea class="plot-text">Solane refuses the Great Song — the first crack in House Elenai's hold.</textarea>
+        </div>
+        <div class="plot-card" style="left:340px;top:90px">
+          <div class="plot-card-h" style="background:#5ec98a22"><span class="plot-dot" style="background:#5ec98a"></span><span class="plot-grab">drag</span><span class="plot-link" style="border-color:#5ec98a"><i style="background:#5ec98a"></i></span><span class="plot-del">&times;</span></div>
+          <textarea class="plot-text">Theron discovers the fracture and hides it from the council.</textarea>
+        </div>
+        <div class="plot-card" style="left:90px;top:270px">
+          <div class="plot-card-h" style="background:#e0a05a22"><span class="plot-dot" style="background:#e0a05a"></span><span class="plot-grab">drag</span><span class="plot-link" style="border-color:#e0a05a"><i style="background:#e0a05a"></i></span><span class="plot-del">&times;</span></div>
+          <textarea class="plot-text">Midpoint: the Great Song answers a stranger, not Solane.</textarea>
+        </div>
+        <div class="plot-card" style="left:470px;top:310px">
+          <div class="plot-card-h" style="background:#c98ad622"><span class="plot-dot" style="background:#c98ad6"></span><span class="plot-grab">drag</span><span class="plot-link" style="border-color:#c98ad6"><i style="background:#c98ad6"></i></span><span class="plot-del">&times;</span></div>
+          <textarea class="plot-text">Open thread: who taught Myra Venn the old harmony?</textarea>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="previewnote">Static preview &middot; Phase 5 Plot board &middot; Beacon (dark)</div>
+</body></html>

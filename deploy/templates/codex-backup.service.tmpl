@@ -1,0 +1,11 @@
+# codex-backup.service — nightly DB dump + books snapshot (MASTER-PLAN Security).
+[Unit]
+Description=Stephen's Codex nightly backup (mysqldump + books snapshot)
+After=mariadb.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=${CODEX_ENV_FILE}
+Environment=BACKUP_DIR=${BACKUP_DIR}
+Environment=CODEX_BOOKS_DIR=${CODEX_BOOKS_DIR}
+ExecStart=/usr/local/sbin/codex-backup.sh

@@ -1,0 +1,11 @@
+# codex-backup.timer — nightly backup at 02:00 (MASTER-PLAN Security).
+[Unit]
+Description=Run Codex backup nightly
+
+[Timer]
+OnCalendar=*-*-* 02:00:00
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

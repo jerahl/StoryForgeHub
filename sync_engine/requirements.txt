@@ -1,0 +1,4 @@
+# MCP server deps (installed into a venv by 04-configure.sh). The reconcile
+# engine itself is stdlib-only; only the remote MCP transport needs these.
+mcp>=1.10
+uvicorn>=0.30

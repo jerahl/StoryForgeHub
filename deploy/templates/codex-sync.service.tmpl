@@ -1,0 +1,28 @@
+# codex-sync.service — one folder<->DB reconcile cycle (MASTER-PLAN Phase 3).
+# Triggered by codex-sync.timer. The always-on replacement for the Windows
+# scheduled task. Runs the stdlib-only engine (no venv needed) against the app
+# over the loopback HTTP endpoint, so api.php stays the single DB-writer path.
+[Unit]
+Description=Stephen's Codex folder<->DB reconcile (one cycle)
+After=mariadb.service php${PHP_VERSION}-fpm.service caddy.service network-online.target
+Wants=mariadb.service caddy.service
+
+[Service]
+Type=oneshot
+User=${CODEX_ADMIN_USER}
+Group=www-data
+EnvironmentFile=${CODEX_ENV_FILE}
+WorkingDirectory=${CODEX_ENGINE_DIR}
+# Token comes from $API_KEY in the EnvironmentFile (never on the cmdline).
+# Invoke cycle.py by absolute path — Python puts the script's own dir on sys.path,
+# so sibling imports resolve regardless of cwd or where the engine is deployed.
+ExecStart=/usr/bin/python3 ${CODEX_ENGINE_DIR}/cycle.py --books ${CODEX_BOOKS_DIR} \
+          --api http://127.0.0.1:8081/api.php --state /var/lib/codex/sync_state.json
+# Hardening: read-only fs except the books folder (entry pulls) and the state dir.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+StateDirectory=codex
+ReadWritePaths=${CODEX_BOOKS_DIR}
+TimeoutStartSec=120
