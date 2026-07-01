@@ -187,6 +187,52 @@ if ($method === 'POST') {
         flash('Book profile set to “'.profile_label($_POST['profile'] ?? 'fiction').'”.');
         redirect(['p'=>'book','book'=>$book]);
     }
+    if ($a === 'chapter_new') {   // Function 1 — seed a new Manuscript/*.md + DB row
+        $r = create_chapter($book, $_POST['title'] ?? '', $_POST['num'] ?? '', $_POST['act_id'] ?? '');
+        flash($r['msg'], $r['status'] === 'ok' ? 'ok' : 'err');
+        if ($r['status'] === 'ok' && !empty($r['id'])) redirect(['p'=>'chapter_edit','book'=>$book,'id'=>$r['id']]);
+        redirect(['p'=>'manuscript','book'=>$book]);
+    }
+    if ($a === 'chapter_import') {   // Function 3a — paste Markdown or upload one/more .md
+        $done = 0; $errs = [];
+        if (!empty($_FILES['files']['name'][0])) {
+            foreach ($_FILES['files']['name'] as $i => $nm) {
+                if (($_FILES['files']['error'][$i] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) continue;
+                if (!is_uploaded_file($_FILES['files']['tmp_name'][$i])) continue;
+                $r = import_chapter_md($book, $nm, file_get_contents($_FILES['files']['tmp_name'][$i]));
+                if ($r['status'] === 'ok') $done++; else $errs[] = $nm.': '.$r['msg'];
+            }
+        }
+        $paste = trim($_POST['md'] ?? '');
+        if ($paste !== '') {
+            $r = import_chapter_md($book, $_POST['filename'] ?? '', $paste);
+            if ($r['status'] === 'ok') $done++; else $errs[] = $r['msg'];
+        }
+        if ($done === 0 && !$errs) flash('Nothing to import — paste Markdown or choose .md files.', 'err');
+        elseif ($errs) flash('Imported '.$done.'; problems: '.implode(' · ', $errs), $done ? 'ok' : 'err');
+        else flash('Imported '.$done.' chapter'.($done === 1 ? '' : 's').'.');
+        redirect(['p'=>'manuscript','book'=>$book]);
+    }
+    if ($a === 'book_new') {   // Function 2 — create folder skeleton + book row
+        $r = create_book([
+            'title'=>$_POST['title'] ?? '', 'series'=>$_POST['series'] ?? '', 'num'=>$_POST['num'] ?? '',
+            'logline'=>$_POST['logline'] ?? '', 'genre'=>$_POST['genre'] ?? '', 'dot'=>$_POST['dot'] ?? '#4A4391',
+            'profile'=>$_POST['profile'] ?? 'fiction',
+        ]);
+        flash($r['msg'], $r['status'] === 'ok' ? 'ok' : 'err');
+        if ($r['status'] === 'ok' && !empty($r['id'])) redirect(['p'=>'book','book'=>$r['id']]);
+        redirect(['p'=>'library']);
+    }
+    if ($a === 'book_import') {   // Function 3b — upload a zipped book folder
+        if (empty($_FILES['file']['tmp_name']) || !is_uploaded_file($_FILES['file']['tmp_name'])) {
+            flash('Choose a .zip file to import.', 'err');
+            redirect(['p'=>'library']);
+        }
+        $r = import_book_zip($_FILES['file']['tmp_name'], ['profile'=>$_POST['profile'] ?? 'fiction', 'title'=>$_POST['title'] ?? '']);
+        flash($r['msg'], $r['status'] === 'ok' ? 'ok' : 'err');
+        if ($r['status'] === 'ok' && !empty($r['id'])) redirect(['p'=>'book','book'=>$r['id']]);
+        redirect(['p'=>'library']);
+    }
     if ($a === 'source_save') {
         $sid = save_source($book, [
             'id'=>$_POST['id']??'', 'cite_key'=>$_POST['cite_key']??'', 'type'=>$_POST['type']??'web',
@@ -426,6 +472,32 @@ case 'library':
         echo '</div></a>';
     }
     echo '</div>';
+
+    // ---- New book / Import book (Markdown-canonical; gated on CODEX_BOOKS_DIR) ----
+    if (books_dir_set()) {
+        $profOpts = '';
+        foreach (profile_ids() as $pid) $profOpts .= '<option value="'.e($pid).'">'.e(profile_label($pid)).'</option>';
+        echo '<div class="toolbar" style="margin-top:22px">';
+        echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">+ New book</summary>';
+        echo '<form method="post" style="margin-top:12px"><input type="hidden" name="action" value="book_new">';
+        echo '<label class="f">Title</label><input type="text" name="title" required placeholder="Untitled book">';
+        echo '<div class="formrow"><div><label class="f">Series (optional)</label><input type="text" name="series"></div>'
+           . '<div><label class="f">Book #</label><input type="text" name="num" placeholder="1"></div></div>';
+        echo '<label class="f">Logline (optional)</label><input type="text" name="logline">';
+        echo '<div class="formrow"><div><label class="f">Profile</label><select name="profile">'.$profOpts.'</select></div>'
+           . '<div><label class="f">Dot colour</label><input type="color" name="dot" value="#4A4391" style="width:64px;padding:2px;height:36px"></div></div>';
+        echo '<div class="toolbar"><button class="btn primary">Create book</button></div>';
+        echo '<p class="muted" style="font-size:12px">Creates the folder skeleton on disk (Manuscript/ + Codex/) and the book row. Markdown stays canonical.</p></form></details>';
+        echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">Import book (.zip)</summary>';
+        echo '<form method="post" enctype="multipart/form-data" style="margin-top:12px"><input type="hidden" name="action" value="book_import">';
+        echo '<label class="f">Zipped book folder</label><input type="file" name="file" accept=".zip" required>';
+        echo '<label class="f" style="margin-top:8px">Profile</label><select name="profile">'.$profOpts.'</select>';
+        echo '<div class="toolbar"><button class="btn">Import .zip</button></div>';
+        echo '<p class="muted" style="font-size:12px">Upload a zip containing a book folder with <span class="mono">Codex/</span> and <span class="mono">Manuscript/</span>. It unzips under your books root (a fresh folder — never over an existing book) and reflects into the app.</p></form></details>';
+        echo '</div>';
+    } else {
+        echo '<p class="muted" style="margin-top:22px">Set <span class="mono">CODEX_BOOKS_DIR</span> to enable creating and importing books in the app (Markdown stays the source of truth).</p>';
+    }
     break;
 
 case 'book':
@@ -711,7 +783,35 @@ case 'manuscript':
     echo '<div class="toolbar"><a class="btn sm'.($view==='list'?' primary':'').'" href="'.url(['p'=>'manuscript','book'=>$book['id']]).'">List</a>'
        . '<a class="btn sm'.($view==='grid'?' primary':'').'" href="'.url(['p'=>'manuscript','book'=>$book['id'],'view'=>'grid']).'">Grid</a>'
        . '<form method="post" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="reindex_mentions"><input type="hidden" name="book" value="'.e($book['id']).'"><button class="btn sm" title="Rebuild the name/alias mention index for this book">Reindex mentions</button></form></div>';
-    if (!$ch && !$arch) { echo '<p class="empty">No chapters synced yet.</p>'; break; }
+
+    // ---- New chapter / Import chapter(s) (Markdown-canonical; gated on CODEX_BOOKS_DIR) ----
+    if (books_dir_set()) {
+        $mb = bands_for($book['profile'] ?? 'fiction');   // "Chapter" copy; act/part-aware assign label
+        $acts = get_acts($book['id']);
+        $bh = '<input type="hidden" name="book" value="'.e($book['id']).'">';
+        echo '<div class="toolbar">';
+        echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">+ New chapter</summary>';
+        echo '<form method="post" style="margin-top:12px"><input type="hidden" name="action" value="chapter_new">'.$bh;
+        echo '<label class="f">Title</label><input type="text" name="title" required placeholder="Chapter title">';
+        echo '<div class="formrow"><div><label class="f">Number (optional)</label><input type="text" name="num" placeholder="auto"></div>';
+        if ($acts) {
+            echo '<div><label class="f">'.e($mb['actSingular']).' (optional)</label><select name="act_id"><option value="">— none —</option>';
+            foreach ($acts as $a) echo '<option value="'.(int)$a['id'].'">'.e($a['title']).'</option>';
+            echo '</select></div>';
+        }
+        echo '</div><div class="toolbar"><button class="btn primary">Create &amp; edit</button></div>';
+        echo '<p class="muted" style="font-size:12px">Seeds <span class="mono">Manuscript/ch-NN-title.md</span> with a heading, then opens the editor. Never overwrites an existing file.</p></form></details>';
+        echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">Import chapter(s)</summary>';
+        echo '<form method="post" enctype="multipart/form-data" style="margin-top:12px"><input type="hidden" name="action" value="chapter_import">'.$bh;
+        echo '<label class="f">Upload .md file(s)</label><input type="file" name="files[]" accept=".md,.markdown,.txt" multiple>';
+        echo '<label class="f" style="margin-top:8px">…or paste Markdown</label><textarea name="md" style="min-height:120px" placeholder="## Chapter 1 — Title&#10;&#10;Prose…"></textarea>';
+        echo '<label class="f">Filename for pasted chapter (optional)</label><input type="text" name="filename" placeholder="derived from the heading">';
+        echo '<div class="toolbar"><button class="btn">Import</button></div>';
+        echo '<p class="muted" style="font-size:12px">Each file (and any paste) becomes a chapter under <span class="mono">Manuscript/</span>. Filenames are deduped — imports never overwrite.</p></form></details>';
+        echo '</div>';
+    }
+
+    if (!$ch && !$arch) { echo '<p class="empty">No chapters synced yet.'.(books_dir_set() ? ' Create one above.' : '').'</p>'; break; }
     if ($view === 'grid' && $ch) {
         // Act bands → chapter columns → scene cards (read-only). Acts have no CRUD
         // yet, so chapters with no act_id fall into a single "Chapters" band.

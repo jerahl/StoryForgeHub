@@ -213,18 +213,9 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
             return ['status'=>'ok', 'msg'=>'No changes.'];
     }
 
-    // backup the current file before overwriting (ignored by sync: not *.md at top level)
-    $dir = dirname($path);
-    if (is_file($path)) {
-        $bdir = $dir.'/_backups';
-        @mkdir($bdir, 0775, true);
-        @copy($path, $bdir.'/'.basename($path).'.'.date('Ymd-His').'.bak');
-    } else {
-        @mkdir($dir, 0775, true);
-    }
-
-    if (@file_put_contents($path, $new_md) === false)
-        return ['status'=>'error', 'msg'=>'Could not write '.$path.' (check php-fpm write permission on the books folder).'];
+    // backup the current file before overwriting + write (shared with create/import)
+    $w = write_manuscript_bytes($path, $new_md);
+    if ($w['status'] !== 'ok') return $w;
 
     // update the DB to match (so the next sync sees folder == DB → no clobber)
     $wc = md_word_count($new_md);
@@ -233,6 +224,267 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     reconcile_exercises($book_id, (int)$chapter_id, $new_md);   // Phase 13
     reconcile_citations($book_id);   // Phase 12: prose edit may add/remove [^cite:key] tokens
     return ['status'=>'ok', 'msg'=>'Saved to the manuscript file and database.'];
+}
+
+/* ------------------------------------------ create / import (shared plumbing) */
+/** True when the Markdown-canonical create/import features are available. Gated on
+ *  CODEX_BOOKS_DIR exactly like chapter editing (Phase 9): if the books root isn't
+ *  configured, the app can't write the .md/folder that must exist before the DB
+ *  projection, so New/Import are disabled. */
+function books_dir_set() { return (cfg()['books_dir'] ?? '') !== ''; }
+
+/** slug for a book folder / id or a chapter filename base: lowercase, ascii, dashes. */
+function slugify_folder($s) {
+    $s = strtolower(trim((string)$s));
+    $s = preg_replace('/[^a-z0-9]+/', '-', $s);
+    return trim((string)preg_replace('/-+/', '-', $s), '-');
+}
+
+/** Resolve + safety-check an absolute path inside a book's Manuscript/ folder.
+ *  $rel is a path relative to Manuscript/. Returns [absolute_path, error]. */
+function manuscript_path($book, $rel) {
+    $books = cfg()['books_dir'] ?? '';
+    if (!$books) return [null, 'Chapter files are disabled (CODEX_BOOKS_DIR not set).'];
+    $rel = ltrim(str_replace('\\', '/', (string)$rel), '/');
+    if (strpos($rel, '..') !== false) return [null, 'Bad chapter path.'];
+    return [rtrim($books, '/').'/'.$book['folder'].'/Manuscript/'.$rel, null];
+}
+
+/** Physical prose writer shared by chapter editing (P9) and create/import: mkdir
+ *  the parent, timestamped-backup any existing file, then write. Does NOT
+ *  conflict-check — callers own the never-clobber decision (create refuses when the
+ *  file exists; the editor compares against the DB body). Returns ['status','msg']. */
+function write_manuscript_bytes($path, $md) {
+    $dir = dirname($path);
+    if (is_file($path)) {
+        $bdir = $dir.'/_backups';
+        @mkdir($bdir, 0775, true);
+        @copy($path, $bdir.'/'.basename($path).'.'.date('Ymd-His').'.bak');
+    } else {
+        @mkdir($dir, 0775, true);
+    }
+    if (@file_put_contents($path, $md) === false)
+        return ['status'=>'error', 'msg'=>'Could not write '.$path.' (check php-fpm write permission on the books folder).'];
+    return ['status'=>'ok', 'msg'=>'Wrote '.basename($path).'.'];
+}
+
+/** A Manuscript/ filename that collides with neither an on-disk file nor a DB row.
+ *  $base is a slug with no extension; appends -2, -3… until free. */
+function unique_manuscript_file($book, $base) {
+    $base = $base !== '' ? $base : 'chapter';
+    $cand = $base.'.md'; $n = 2;
+    while (true) {
+        [$path, $err] = manuscript_path($book, $cand);
+        $inDb = val("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book['id'], $cand]);
+        if (($err !== null || !is_file($path)) && !$inDb) return $cand;
+        $cand = $base.'-'.$n.'.md'; $n++;
+    }
+}
+
+/** A book id not already taken. */
+function unique_book_id($base) {
+    $base = $base !== '' ? $base : 'book';
+    $id = $base; $n = 2;
+    while (val("SELECT id FROM books WHERE id=?", [$id])) { $id = $base.'-'.$n; $n++; }
+    return $id;
+}
+
+/** A book folder name that is neither an existing DB folder nor an on-disk dir. */
+function unique_book_folder($base) {
+    $base = $base !== '' ? $base : 'book';
+    $books = cfg()['books_dir'] ?? '';
+    $folder = $base; $n = 2;
+    while (book_id_for_folder($folder) || ($books && is_dir(rtrim($books, '/').'/'.$folder))) { $folder = $base.'-'.$n; $n++; }
+    return $folder;
+}
+
+/** Function 1 — New chapter. Seeds Manuscript/<slug>.md with a heading, reflects it
+ *  into the DB via upsert_chapter_from_md(), and optionally assigns it to an act.
+ *  Never clobbers: refuses if the derived file already exists. Folder-first.
+ *  Returns ['status','msg','id'?,'file'?]. */
+function create_chapter($book_id, $title, $num = '', $act_id = '') {
+    if (!books_dir_set()) return ['status'=>'error', 'msg'=>'Creating chapters is disabled (CODEX_BOOKS_DIR not set).'];
+    $b = get_book($book_id);
+    if (!$b) return ['status'=>'error', 'msg'=>'Book not found.'];
+    $title = trim((string)$title);
+    if ($title === '') return ['status'=>'error', 'msg'=>'Give the chapter a title.'];
+
+    $num = trim((string)$num);
+    if ($num === '') {   // default: one past the highest numbered live chapter
+        $max = (int) val("SELECT COALESCE(MAX(num+0),0) FROM chapters WHERE book_id=? AND LOWER(file) NOT LIKE '%readme.md'", [$book_id]);
+        $num = (string)($max + 1);
+    }
+    $numeric = preg_match('/^\d+$/', $num);
+    $numPad = $numeric ? str_pad($num, 2, '0', STR_PAD_LEFT) : '';
+
+    // Match the book's ch-NN-title.md convention; dedupe against disk + DB.
+    $base = ($numPad !== '' ? 'ch-'.$numPad.'-' : '').slugify_folder($title);
+    $file = unique_manuscript_file($b, rtrim($base, '-'));
+    [$path, $err] = manuscript_path($b, $file);
+    if ($err) return ['status'=>'error', 'msg'=>$err];
+    if (is_file($path)) return ['status'=>'error', 'msg'=>'A file named '.$file.' already exists — refusing to overwrite.'];
+
+    $heading = '## Chapter '.($numeric ? (string)(int)$num : $num).' — '.$title;
+    $md = $heading."\n\n";
+    $w = write_manuscript_bytes($path, $md);
+    if ($w['status'] !== 'ok') return $w;
+
+    upsert_chapter_from_md($book_id, $file, $md);
+    $row = one("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book_id, $file]);
+    $cid = $row ? (int)$row['id'] : 0;
+    if ($cid && $act_id !== '' && $act_id !== null) set_chapter_act($cid, $book_id, $act_id);
+    return ['status'=>'ok', 'msg'=>'Created chapter “'.$title.'”.', 'id'=>$cid, 'file'=>$file];
+}
+
+/** Function 3a — import one chapter from Markdown (paste or a single .md upload).
+ *  Thin wrapper over the shared writer: sanitize the filename, never clobber
+ *  (dedupe), write to Manuscript/, then upsert. Returns ['status','msg','id'?,'file'?]. */
+function import_chapter_md($book_id, $filename, $content) {
+    if (!books_dir_set()) return ['status'=>'error', 'msg'=>'Importing is disabled (CODEX_BOOKS_DIR not set).'];
+    $b = get_book($book_id);
+    if (!$b) return ['status'=>'error', 'msg'=>'Book not found.'];
+    $content = str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], (string)$content);
+    if (trim($content) === '') return ['status'=>'error', 'msg'=>'Nothing to import (empty content).'];
+
+    $name = basename(str_replace('\\', '/', (string)$filename));
+    $name = preg_replace('/[^A-Za-z0-9._-]+/', '-', $name);
+    $name = ltrim((string)$name, '.-');
+    $base = slugify_folder(preg_replace('/\.md$/i', '', $name));
+    if ($base === '') {   // derive a slug from the first heading, else a generic name
+        if (preg_match('/^#{1,3}\s*(.+)$/m', $content, $hm)) $base = slugify_folder($hm[1]);
+        if ($base === '') $base = 'imported-chapter';
+    }
+    $file = unique_manuscript_file($b, $base);
+    [$path, $err] = manuscript_path($b, $file);
+    if ($err) return ['status'=>'error', 'msg'=>$err];
+
+    $w = write_manuscript_bytes($path, $content);
+    if ($w['status'] !== 'ok') return $w;
+    upsert_chapter_from_md($book_id, $file, $content);
+    $row = one("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book_id, $file]);
+    return ['status'=>'ok', 'msg'=>'Imported '.$file.'.', 'id'=>$row ? (int)$row['id'] : 0, 'file'=>$file];
+}
+
+/** Function 2 — New book. Derives a unique id + folder from the title, creates the
+ *  folder skeleton on disk (Manuscript/ + Codex/<each profile db>/ + Codex/Meta/),
+ *  then writes the book row via save_book() with the chosen profile. Folder-first.
+ *  Returns ['status','msg','id'?]. */
+function create_book($f) {
+    if (!books_dir_set()) return ['status'=>'error', 'msg'=>'Creating books is disabled (CODEX_BOOKS_DIR not set).'];
+    $books = cfg()['books_dir'] ?? '';
+    $title = trim((string)($f['title'] ?? ''));
+    if ($title === '') return ['status'=>'error', 'msg'=>'Give the book a title.'];
+    $profile = normalize_profile($f['profile'] ?? 'fiction');
+
+    $slug   = slugify_folder($title) ?: 'book';
+    $folder = unique_book_folder($slug);
+    $id     = unique_book_id($slug);
+    $root   = rtrim($books, '/').'/'.$folder;
+    if (is_dir($root)) return ['status'=>'error', 'msg'=>'A folder named '.$folder.' already exists.'];
+
+    @mkdir($root.'/Manuscript', 0775, true);
+    foreach (dbmeta_for($profile) as $meta) {
+        $fdr = $meta['folder'] ?? '';
+        if ($fdr !== '') @mkdir($root.'/Codex/'.$fdr, 0775, true);
+    }
+    @mkdir($root.'/Codex/Meta', 0775, true);
+    if (!is_dir($root.'/Manuscript'))
+        return ['status'=>'error', 'msg'=>'Could not create the book folder under '.$books.' (check write permission).'];
+
+    save_book([
+        'id'=>$id, 'folder'=>$folder, 'title'=>$title,
+        'series'=>$f['series'] ?? '', 'num'=>$f['num'] ?? '', 'status'=>$f['status'] ?? 'planning',
+        'logline'=>$f['logline'] ?? '', 'genre'=>$f['genre'] ?? '', 'word_target'=>$f['word_target'] ?? '',
+        'dot'=>$f['dot'] ?? '#4A4391',
+        'sort_order'=>(int) val("SELECT COALESCE(MAX(sort_order),-1)+1 FROM books", []),
+        'profile'=>$profile,
+    ]);
+    return ['status'=>'ok', 'msg'=>'Created book “'.$title.'”.', 'id'=>$id];
+}
+
+/** Function 3b — import a zipped book folder. Unzips into a fresh (deduped) folder
+ *  under books_dir with zip-slip + size guards, then reflects the .md into the DB
+ *  via push_files() — no new parse logic. The zip may wrap the book in a single top
+ *  folder (stripped) or hold Codex//Manuscript at its root. Returns ['status','msg','id'?,'report'?]. */
+function import_book_zip($zip_path, $opts = []) {
+    if (!books_dir_set()) return ['status'=>'error', 'msg'=>'Importing is disabled (CODEX_BOOKS_DIR not set).'];
+    if (!class_exists('ZipArchive')) return ['status'=>'error', 'msg'=>'ZIP support (php-zip) is not available on this server.'];
+    $books = cfg()['books_dir'] ?? '';
+
+    $za = new ZipArchive();
+    if ($za->open($zip_path) !== true) return ['status'=>'error', 'msg'=>'Could not open that .zip file.'];
+
+    $MAX_FILES = 5000; $MAX_TOTAL = 200 * 1024 * 1024; $MAX_ONE = 20 * 1024 * 1024;
+    if ($za->numFiles > $MAX_FILES) { $za->close(); return ['status'=>'error', 'msg'=>'That archive has too many files.']; }
+
+    // Collect real file entries, skipping directories and Mac cruft.
+    $entries = [];
+    for ($i = 0; $i < $za->numFiles; $i++) {
+        $st = $za->statIndex($i);
+        if (!$st) continue;
+        $n = str_replace('\\', '/', $st['name']);
+        if ($n === '' || substr($n, -1) === '/') continue;
+        if (strpos($n, '__MACOSX/') !== false || basename($n) === '.DS_Store') continue;   // archive cruft, at any depth
+        $entries[] = ['name'=>$n, 'size'=>(int)$st['size'], 'idx'=>$i];
+    }
+    if (!$entries) { $za->close(); return ['status'=>'error', 'msg'=>'That archive is empty.']; }
+
+    // Detect a single common top-level folder to strip (book zips usually wrap one).
+    $prefix = null;
+    foreach ($entries as $e) {
+        $parts = explode('/', $e['name']);
+        $top = count($parts) > 1 ? $parts[0] : '';
+        if ($prefix === null) $prefix = $top;
+        elseif ($prefix !== $top) { $prefix = ''; break; }
+    }
+    $strip = ($prefix !== null && $prefix !== '') ? $prefix.'/' : '';
+
+    // Validate + size-guard; build the rel=>index map (zip-slip filtered out).
+    $rels = []; $total = 0; $hasBook = false;
+    foreach ($entries as $e) {
+        $rel = $e['name'];
+        if ($strip !== '' && strpos($rel, $strip) === 0) $rel = substr($rel, strlen($strip));
+        $rel = ltrim($rel, '/');
+        if ($rel === '' || strpos($rel, '..') !== false || $rel[0] === '/' || preg_match('#^[A-Za-z]:#', $rel)) continue; // zip-slip
+        if ($e['size'] > $MAX_ONE) { $za->close(); return ['status'=>'error', 'msg'=>'A file in the archive is too large: '.$rel]; }
+        $total += $e['size'];
+        if ($total > $MAX_TOTAL) { $za->close(); return ['status'=>'error', 'msg'=>'That archive is too large (over 200 MB uncompressed).']; }
+        $rels[$rel] = $e['idx'];
+        if (preg_match('#^(Codex|Manuscript)/#', $rel) && preg_match('/\.md$/i', $rel)) $hasBook = true;
+    }
+    if (!$hasBook) { $za->close(); return ['status'=>'error', 'msg'=>'That doesn\'t look like a book folder (no Codex/*.md or Manuscript/*.md inside).']; }
+
+    $title   = trim((string)($opts['title'] ?? '')) ?: ucwords(str_replace('-', ' ', $prefix ?: 'imported book'));
+    $slug    = slugify_folder($opts['folder'] ?? ($prefix ?: $title)) ?: 'book';
+    $folder  = unique_book_folder($slug);   // never write into an existing book's folder
+    $id      = unique_book_id($slug);
+    $root    = rtrim($books, '/').'/'.$folder;
+    @mkdir($root, 0775, true);
+    if (!is_dir($root)) { $za->close(); return ['status'=>'error', 'msg'=>'Could not create '.$root.' (check write permission).']; }
+
+    // Extract to disk (folder is canonical) and gather the .md payload for the DB.
+    $payload = []; $present = [];
+    foreach ($rels as $rel => $idx) {
+        $data = $za->getFromIndex($idx);
+        if ($data === false) continue;
+        $abs = $root.'/'.$rel;
+        $dir = dirname($abs);
+        if (!is_dir($dir)) @mkdir($dir, 0775, true);
+        @file_put_contents($abs, $data);
+        if (preg_match('#^(Codex|Manuscript)/#', $rel) && preg_match('/\.md$/i', $rel)) {
+            $payload[$rel] = str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], $data);
+            if (preg_match('#^Manuscript/(.+\.md)$#i', $rel, $mm)) $present[] = basename($mm[1]);
+        }
+    }
+    $za->close();
+
+    $report = push_files(['books' => [[
+        'folder' => $folder,
+        'book'   => ['id'=>$id, 'title'=>$title, 'folder'=>$folder, 'profile'=>normalize_profile($opts['profile'] ?? 'fiction')],
+        'files'  => $payload,
+        'manuscript_present' => $present,
+    ]]]);
+    return ['status'=>'ok', 'msg'=>'Imported book “'.$title.'” — '.count($payload).' files ('.($report['chapters'] ?? 0).' chapters, '.($report['entries'] ?? 0).' entries).', 'id'=>$id, 'report'=>$report];
 }
 
 /* ----------------------------------------------- manuscript structure (P1) */
