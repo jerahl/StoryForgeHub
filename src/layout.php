@@ -18,24 +18,33 @@ function accent_vars($accent, $mode = 'Light') {
 function md_to_html($md, $book_id = null) {
     $md = str_replace("\x00", '', (string)$md);
     $lines = explode("\n", $md);
-    $html = ''; $inUl = false; $para = []; $linked = [];   // $linked: dedupe auto-mentions across this render
+    $html = ''; $inUl = false; $inOl = false; $para = []; $bq = []; $linked = [];   // $linked: dedupe auto-mentions across this render
     $flushPara = function() use (&$para, &$html, &$linked) {
         if ($para) { $html .= '<p>' . inline_md_with_mentions(implode(' ', $para), $linked) . "</p>\n"; $para = []; }
     };
     $closeUl = function() use (&$inUl, &$html) { if ($inUl) { $html .= "</ul>\n"; $inUl = false; } };
+    $closeOl = function() use (&$inOl, &$html) { if ($inOl) { $html .= "</ol>\n"; $inOl = false; } };
+    $flushBq = function() use (&$bq, &$html, &$linked) {
+        if ($bq) { $html .= '<blockquote>' . inline_md_with_mentions(implode(' ', $bq), $linked) . "</blockquote>\n"; $bq = []; }
+    };
     foreach ($lines as $ln) {
         $t = rtrim($ln);
-        if (trim($t) === '') { $flushPara(); $closeUl(); continue; }
+        if (trim($t) === '') { $flushPara(); $closeUl(); $closeOl(); $flushBq(); continue; }
         if (preg_match('/^\s*([-*_])(?:\s*\1){2,}\s*$/', $t) || trim($t) === '***') {
-            $flushPara(); $closeUl(); $html .= "<hr>\n"; continue; }
-        if (preg_match('/^#{1,6}\s+(.*)$/', $t, $m)) { $flushPara(); $closeUl();
+            $flushPara(); $closeUl(); $closeOl(); $flushBq(); $html .= "<hr>\n"; continue; }
+        if (preg_match('/^#{1,6}\s+(.*)$/', $t, $m)) { $flushPara(); $closeUl(); $closeOl(); $flushBq();
             $html .= '<h3>' . inline_md($m[1]) . "</h3>\n"; continue; }
-        if (preg_match('/^\s*[-*]\s+(.*)$/', $t, $m)) { $flushPara();
+        if (preg_match('/^\s*>\s?(.*)$/', $t, $m)) { $flushPara(); $closeUl(); $closeOl();
+            $bq[] = $m[1]; continue; }
+        if (preg_match('/^\s*\d+[.)]\s+(.*)$/', $t, $m)) { $flushPara(); $closeUl(); $flushBq();
+            if (!$inOl) { $html .= "<ol>\n"; $inOl = true; }
+            $html .= '<li>' . inline_md_with_mentions($m[1], $linked) . "</li>\n"; continue; }
+        if (preg_match('/^\s*[-*]\s+(.*)$/', $t, $m)) { $flushPara(); $closeOl(); $flushBq();
             if (!$inUl) { $html .= "<ul>\n"; $inUl = true; }
             $html .= '<li>' . inline_md_with_mentions($m[1], $linked) . "</li>\n"; continue; }
-        $para[] = trim($t);
+        $flushBq(); $para[] = trim($t);
     }
-    $flushPara(); $closeUl();
+    $flushPara(); $closeUl(); $closeOl(); $flushBq();
     // wiki links -> entry links handled in inline_md via global book
     return $html;
 }
@@ -45,6 +54,12 @@ function inline_md($s) {
     $s = preg_replace('/\*\*(.+?)\*\*/', '<strong>$1</strong>', $s);
     $s = preg_replace('/(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)/', '<em>$1</em>', $s);
     $s = preg_replace('/`([^`]+)`/', '<code>$1</code>', $s);
+    $s = preg_replace('/~~(.+?)~~/', '<del>$1</del>', $s);              // GFM strikethrough
+    $s = str_replace(['&lt;u&gt;', '&lt;/u&gt;'], ['<u>', '</u>'], $s); // underline (no Markdown equivalent)
+    // [text](http…) links — http(s) only (never a javascript: scheme); [[wiki-links]] don't match (they need "](").
+    $s = preg_replace_callback('/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/', function ($m) {
+        return '<a href="' . $m[2] . '" target="_blank" rel="noopener nofollow">' . $m[1] . '</a>';
+    }, $s);
     $bid = $GLOBALS['__link_book'];
     $s = preg_replace_callback('/\[\[([^\]]+)\]\]/', function($m) use ($bid) {
         $slug = trim($m[1]);

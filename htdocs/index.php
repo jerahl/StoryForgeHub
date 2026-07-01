@@ -1326,6 +1326,13 @@ case 'chapter_edit':
   .ed-note{border:1px solid var(--line,#e4e0d8);border-radius:7px;padding:7px 9px;margin:6px 0;font-size:12px}
   .ed-note-q{font-style:italic;color:var(--ink,#2c2a26);margin-bottom:3px}
   .ed-note-n{color:var(--muted,#6b6253)}
+  .md-toolbar{display:flex;gap:2px;align-items:center;flex-wrap:wrap;margin:0 0 6px;padding:4px;border:1px solid var(--line,#e4e0d8);border-radius:8px;background:var(--card,#fff)}
+  .md-toolbar button{min-width:30px;height:30px;padding:0 8px;border:0;border-radius:6px;background:none;cursor:pointer;
+    font:600 14px/1 var(--body-font);color:var(--ink,#2c2a26)}
+  .md-toolbar button:hover{background:var(--accent-soft,#f6f3ee)}
+  .md-toolbar .md-i{font-style:italic}.md-toolbar .md-u{text-decoration:underline}.md-toolbar .md-s{text-decoration:line-through}
+  .md-toolbar .md-code{font-family:var(--mono);font-size:12px}
+  .md-toolbar .md-div{width:1px;align-self:stretch;background:var(--line,#e4e0d8);margin:2px 4px}
 </style>
 CSS;
 
@@ -1372,6 +1379,20 @@ CSS;
        . '</div>';
 
     echo '<div class="chapterwrap"><div class="chaptermain">';
+    // Markdown formatting toolbar — wraps/prefixes the textarea selection (Ctrl/⌘-B/I/U)
+    echo '<div class="md-toolbar" id="mdToolbar">'
+       . '<button type="button" data-md="bold" title="Bold (Ctrl/⌘-B)" style="font-weight:800">B</button>'
+       . '<button type="button" data-md="italic" title="Italic (Ctrl/⌘-I)" class="md-i">I</button>'
+       . '<button type="button" data-md="underline" title="Underline (Ctrl/⌘-U)" class="md-u">U</button>'
+       . '<button type="button" data-md="strike" title="Strikethrough" class="md-s">S</button>'
+       . '<button type="button" data-md="code" title="Inline code" class="md-code">&lt;/&gt;</button>'
+       . '<span class="md-div"></span>'
+       . '<button type="button" data-md="h2" title="Heading">H</button>'
+       . '<button type="button" data-md="quote" title="Blockquote">&ldquo;</button>'
+       . '<button type="button" data-md="ul" title="Bulleted list">&bull;</button>'
+       . '<button type="button" data-md="ol" title="Numbered list" style="font-size:12px">1.</button>'
+       . '<button type="button" data-md="link" title="Link">&#128279;</button>'
+       . '</div>';
     echo '<textarea id="chapter-md" name="md" spellcheck="true" style="width:100%;min-height:62vh;font-family:var(--mono);font-size:13px;line-height:1.5">'.e($c['body']).'</textarea>';
     // Local style-check results (hidden until toggled)
     echo '<div class="ed-style" id="edStyle" hidden><div class="ed-style-h">Style check <span class="muted" id="edStyleN"></span></div><div id="edStyleList"></div></div>';
@@ -1611,6 +1632,65 @@ JS;
     post({action:'dictionary_add', ajax:'1', book:E.book, term:w}).then(function(r){return r.json();}).then(function(j){
       if(j&&j.ok){ known[w.toLowerCase()]=true; setStatus('Added “'+w+'” to dictionary','ok'); setTimeout(function(){ if(!dirty)setStatus('Saved'); },1800); }
     });
+  });
+})();</script>
+JS;
+
+    // Phase 15 — Markdown formatting toolbar (wrap/prefix the textarea selection)
+    echo <<<'JS'
+<script>(function(){
+  var ta=document.getElementById('chapter-md'), bar=document.getElementById('mdToolbar');
+  if(!ta||!bar) return;
+  function fire(){ ta.dispatchEvent(new Event('input',{bubbles:true})); }   // drive autosave/word-count/scene/style
+  function wrap(before, after){
+    after = (after===undefined) ? before : after;
+    var s=ta.selectionStart, e=ta.selectionEnd, v=ta.value, sel=v.slice(s,e);
+    // toggle off: markers inside the selection …
+    if(sel.length>=before.length+after.length && sel.slice(0,before.length)===before && sel.slice(sel.length-after.length)===after){
+      var inner=sel.slice(before.length, sel.length-after.length);
+      ta.setRangeText(inner, s, e, 'select'); ta.focus(); fire(); return;
+    }
+    // … or markers just outside it
+    if(v.slice(Math.max(0,s-before.length),s)===before && v.slice(e,e+after.length)===after){
+      ta.setRangeText(sel, s-before.length, e+after.length, 'select'); ta.focus(); fire(); return;
+    }
+    ta.setRangeText(before+sel+after, s, e, 'end');
+    if(s===e){ var p=s+before.length; ta.setSelectionRange(p,p); }        // empty: caret between markers
+    else ta.setSelectionRange(s+before.length, e+before.length);          // keep the text selected
+    ta.focus(); fire();
+  }
+  function prefixLines(prefix, numbered){
+    var s=ta.selectionStart, e=ta.selectionEnd, v=ta.value;
+    var ls=v.lastIndexOf('\n', s-1)+1, le=v.indexOf('\n', e); if(le<0)le=v.length;
+    var lines=v.slice(ls,le).split('\n');
+    var re=numbered ? /^\d+[.)]\s+/ : new RegExp('^'+prefix.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+    var all=lines.every(function(l){ return l==='' || re.test(l); });
+    var n=0, out=lines.map(function(l){
+      if(all) return l.replace(re,'');
+      if(l==='') return l;
+      n++; return (numbered ? (n+'. ') : prefix) + l;
+    }).join('\n');
+    ta.setRangeText(out, ls, le, 'select'); ta.focus(); fire();
+  }
+  function link(){
+    var s=ta.selectionStart, e=ta.selectionEnd, sel=ta.value.slice(s,e), text=sel||'text';
+    var md='['+text+'](https://)';
+    ta.setRangeText(md, s, e, 'end');
+    var us=s+md.indexOf('(')+1; ta.setSelectionRange(us, us+8); ta.focus(); fire();  // select "https://"
+  }
+  var actions={
+    bold:function(){wrap('**');}, italic:function(){wrap('*');}, underline:function(){wrap('<u>','</u>');},
+    strike:function(){wrap('~~');}, code:function(){wrap('`');},
+    h2:function(){prefixLines('## ');}, quote:function(){prefixLines('> ');},
+    ul:function(){prefixLines('- ');}, ol:function(){prefixLines('',true);}, link:link
+  };
+  bar.addEventListener('mousedown', function(ev){ var b=ev.target.closest('button[data-md]'); if(!b)return; ev.preventDefault(); (actions[b.dataset.md]||function(){})(); });
+  ta.addEventListener('keydown', function(e){
+    if(!(e.ctrlKey||e.metaKey)||e.altKey) return;
+    var k=e.key.toLowerCase();
+    if(k==='b'){ e.preventDefault(); actions.bold(); }
+    else if(k==='i'){ e.preventDefault(); actions.italic(); }
+    else if(k==='u'){ e.preventDefault(); actions.underline(); }
   });
 })();</script>
 JS;
