@@ -227,4 +227,39 @@ CREATE TABLE IF NOT EXISTS sync_state (
   UNIQUE KEY uniq_kv (book_id, k)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- sources & citations (Phase 12) — the credibility backbone for non-fiction.
+-- sources: one row per work, keyed by a stable cite_key (matches [^cite:key] tokens).
+CREATE TABLE IF NOT EXISTS sources (
+  id         INT AUTO_INCREMENT PRIMARY KEY,
+  book_id    VARCHAR(40)  NOT NULL,
+  cite_key   VARCHAR(160) NOT NULL,
+  type       VARCHAR(20)  DEFAULT 'web',           -- book|article|study|interview|web
+  author     VARCHAR(255) DEFAULT '',
+  title      VARCHAR(500) DEFAULT '',
+  year       VARCHAR(20)  DEFAULT '',
+  publisher  VARCHAR(255) DEFAULT '',              -- publisher / journal
+  url        TEXT,                                 -- URL / DOI
+  accessed   VARCHAR(40)  DEFAULT '',
+  locator    VARCHAR(160) DEFAULT '',              -- page / timestamp
+  note       TEXT,
+  sort_order INT          DEFAULT 0,
+  updated_at DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_source (book_id, cite_key),
+  KEY k_book (book_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- claim_sources: REBUILDABLE cache linking a chapter (by chapter_file) to the
+-- sources it cites, derived by scanning prose for [^cite:key] tokens.
+CREATE TABLE IF NOT EXISTS claim_sources (
+  id           INT AUTO_INCREMENT PRIMARY KEY,
+  book_id      VARCHAR(40)  NOT NULL,
+  chapter_file VARCHAR(255) NOT NULL,
+  source_id    INT          DEFAULT NULL,           -- NULL = cited key with no matching source
+  cite_key     VARCHAR(160) NOT NULL,
+  hits         INT          DEFAULT 1,
+  created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  KEY k_claim_book_file (book_id, chapter_file),
+  KEY k_claim_src (source_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;

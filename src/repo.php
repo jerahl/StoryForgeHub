@@ -230,6 +230,7 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     $wc = md_word_count($new_md);
     q("UPDATE chapters SET body=?, word_count=?, words=? WHERE id=?", [$new_md, $wc, number_format($wc), (int)$chapter_id]);
     reconcile_scenes($book_id, (int)$chapter_id, $new_md);
+    reconcile_citations($book_id);   // Phase 12: prose edit may add/remove [^cite:key] tokens
     return ['status'=>'ok', 'msg'=>'Saved to the manuscript file and database.'];
 }
 
@@ -775,14 +776,17 @@ function import_snapshot($snap) {
         foreach ($bk['meta'] as $mp) save_meta_page($bid, $mp['slug'], $mp['title'], $mp['body']);
         // notes (Codex/Notes) — present only if the snapshot includes them
         foreach (($bk['notes'] ?? []) as $np) save_note_page($bid, $np['slug'], $np['title'] ?? ucfirst(str_replace('-',' ',$np['slug'])), $np['body'] ?? '');
+        // sources (Phase 12) — present only if the snapshot includes them
+        foreach (($bk['sources'] ?? []) as $sr) save_source($bid, $sr);
         rebuild_threads($bid);
+        reconcile_citations($bid);   // Phase 12: rebuild claim links from prose cite tokens
     }
 }
 
 /* ===================================================== SYNC: push files */
 /** payload: { books: [ {folder, files:{relpath: content}} ] }  (folder -> web) */
 function push_files($payload) {
-    $report = ['entries'=>0,'chapters'=>0,'meta'=>0,'notes'=>0,'progressions'=>0,'archived'=>0,'skipped'=>0,'created'=>[],'books'=>[]];
+    $report = ['entries'=>0,'chapters'=>0,'meta'=>0,'notes'=>0,'progressions'=>0,'sources'=>0,'archived'=>0,'skipped'=>0,'created'=>[],'books'=>[]];
     // Recognize every profile's Codex folders (Phase 11), not just fiction's, so a
     // non-fiction book's Codex/Concepts/*.md round-trips through the same parser.
     $db_by_folder = folder_db_map();
@@ -808,7 +812,13 @@ function push_files($payload) {
         foreach (($bk['files'] ?? []) as $rel => $content) {
             $rel = str_replace('\\', '/', $rel);
             $base = strtolower(basename($rel));
-            if (preg_match($folder_re, $rel, $m)) {
+            if (preg_match('#^Codex/Sources/(.+)\.md$#', $rel, $m)) {
+                // Sources are a dedicated table (Phase 12), parsed straight from
+                // Codex/Sources/*.md — never generic entries.
+                if ($base === 'index.md' || strpos($base,'template')!==false || $base[0]==='_') { continue; }
+                import_source_md($bid, $m[1], $content);
+                $report['sources']++; $touched++;
+            } elseif (preg_match($folder_re, $rel, $m)) {
                 $folder = $m[1]; $slug = $m[2];
                 if ($base === 'index.md' || strpos($base,'template')!==false || $base[0]==='_') { continue; }
                 $db = $db_by_folder[$folder];
@@ -861,6 +871,7 @@ function push_files($payload) {
             }
         }
         rebuild_threads($bid);
+        reconcile_citations($bid);   // Phase 12: rebuild claim links from prose cite tokens
         $report['books'][$bk['folder']] = $touched;
     }
     return $report;
@@ -1318,3 +1329,191 @@ function get_book_diagnostics($book_id) {
 /** Warm/refresh the diagnostics cache for a book (used by the reindex CLI/timer). */
 function reindex_prose($book_id) { ensure_prose_analysis(); $n = 0; foreach (get_chapters($book_id) as $ch) { if (preg_match('/readme\.md$/i', (string)$ch['file'])) continue; get_chapter_diagnostics($book_id, $ch['id']); $n++; } return $n; }
 function reindex_prose_all() { foreach (get_books() as $b) reindex_prose($b['id']); }
+
+/* ============================================ SOURCES & CITATIONS (Phase 12)
+ * The credibility backbone for non-fiction. Two tables, lazily migrated:
+ *   sources        — citation metadata, one row per work, keyed by a stable cite_key.
+ *   claim_sources  — a REBUILDABLE cache linking a chapter (by chapter_file, the same
+ *                    stable key chapter_notes uses) to the sources it cites, derived
+ *                    by scanning prose for `[^cite:key]` tokens. Prose stays canonical;
+ *                    losing this table costs nothing — reconcile_citations() rebuilds it.
+ * Sources are authored in Codex/Sources/<cite_key>.md (folder = source of truth) and
+ * parsed into the table on push; citation tokens round-trip untouched. */
+function source_types() { return ['book','article','study','interview','web']; }
+
+function ensure_sources() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    foreach ([
+        "CREATE TABLE IF NOT EXISTS sources (
+            id $pk, book_id VARCHAR(40) NOT NULL, cite_key VARCHAR(160) NOT NULL,
+            type VARCHAR(20) DEFAULT 'web', author VARCHAR(255) DEFAULT '', title VARCHAR(500) DEFAULT '',
+            year VARCHAR(20) DEFAULT '', publisher VARCHAR(255) DEFAULT '', url TEXT,
+            accessed VARCHAR(40) DEFAULT '', locator VARCHAR(160) DEFAULT '', note TEXT,
+            sort_order INT DEFAULT 0, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP )",
+        "CREATE TABLE IF NOT EXISTS claim_sources (
+            id $pk, book_id VARCHAR(40) NOT NULL, chapter_file VARCHAR(255) NOT NULL,
+            source_id INT DEFAULT NULL, cite_key VARCHAR(160) NOT NULL, hits INT DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP )",
+    ] as $s) { try { db()->exec($s); } catch (Exception $e) {} }
+    try { db()->exec("CREATE UNIQUE INDEX uniq_source ON sources (book_id, cite_key)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_claim_book_file ON claim_sources (book_id, chapter_file)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_claim_src ON claim_sources (source_id)"); } catch (Exception $e) {}
+}
+
+function get_sources($book_id) { ensure_sources(); return all("SELECT * FROM sources WHERE book_id=? ORDER BY sort_order, LOWER(author), LOWER(title), cite_key", [$book_id]); }
+function get_source($book_id, $id) { ensure_sources(); return one("SELECT * FROM sources WHERE book_id=? AND id=?", [$book_id, (int)$id]); }
+function get_source_by_key($book_id, $key) { ensure_sources(); return one("SELECT * FROM sources WHERE book_id=? AND cite_key=?", [$book_id, (string)$key]); }
+
+/** Insert/update a source, keyed by cite_key within the book. Returns the id. */
+function save_source($book_id, $d) {
+    ensure_sources();
+    $key = trim((string)($d['cite_key'] ?? ''));
+    if ($key === '') {
+        // derive a stable key: author-year, else a slug of the title
+        $base = trim((string)($d['author'] ?? '')) ?: trim((string)($d['title'] ?? '')) ?: 'source';
+        $key = strtolower(preg_replace('/[^a-z0-9]+/i', '-', $base));
+        $yr = preg_replace('/[^0-9]/', '', (string)($d['year'] ?? ''));
+        if ($yr !== '') $key .= '-' . $yr;
+        $key = trim(preg_replace('/-+/', '-', $key), '-') ?: 'source';
+    }
+    $type = in_array($d['type'] ?? '', source_types(), true) ? $d['type'] : 'web';
+    $cols = [
+        'type'=>$type, 'author'=>(string)($d['author'] ?? ''), 'title'=>(string)($d['title'] ?? ''),
+        'year'=>(string)($d['year'] ?? ''), 'publisher'=>(string)($d['publisher'] ?? ''),
+        'url'=>(string)($d['url'] ?? ''), 'accessed'=>(string)($d['accessed'] ?? ''),
+        'locator'=>(string)($d['locator'] ?? ''), 'note'=>(string)($d['note'] ?? ''),
+    ];
+    $existing = one("SELECT id FROM sources WHERE book_id=? AND cite_key=?", [$book_id, $key]);
+    if (!$existing && !empty($d['id'])) $existing = one("SELECT id FROM sources WHERE book_id=? AND id=?", [$book_id, (int)$d['id']]);
+    if ($existing) {
+        q("UPDATE sources SET cite_key=?,type=?,author=?,title=?,year=?,publisher=?,url=?,accessed=?,locator=?,note=? WHERE id=?",
+          [$key,$cols['type'],$cols['author'],$cols['title'],$cols['year'],$cols['publisher'],$cols['url'],$cols['accessed'],$cols['locator'],$cols['note'],$existing['id']]);
+        $id = (int)$existing['id'];
+    } else {
+        $n = (int) val("SELECT COALESCE(MAX(sort_order),-1)+1 FROM sources WHERE book_id=?", [$book_id]);
+        q("INSERT INTO sources (book_id,cite_key,type,author,title,year,publisher,url,accessed,locator,note,sort_order)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+          [$book_id,$key,$cols['type'],$cols['author'],$cols['title'],$cols['year'],$cols['publisher'],$cols['url'],$cols['accessed'],$cols['locator'],$cols['note'],$n]);
+        $id = (int) last_id();
+    }
+    return $id;
+}
+
+function delete_source($book_id, $id) {
+    ensure_sources();
+    q("DELETE FROM sources WHERE book_id=? AND id=?", [$book_id, (int)$id]);
+    q("UPDATE claim_sources SET source_id=NULL WHERE book_id=? AND source_id=?", [$book_id, (int)$id]);
+}
+
+/** Parse a Codex/Sources/<slug>.md into the sources table. Reuses the entry
+ *  parser for the metadata list, then maps the labelled fields onto columns.
+ *  cite_key = slug, so `[^cite:<slug>]` tokens resolve against it. */
+function import_source_md($book_id, $file, $content) {
+    ensure_sources();
+    $slug = preg_replace('/\.md$/i', '', basename(str_replace('\\', '/', $file)));
+    $e = md_parse_entry($content, 'sources', $slug);
+    $f = [];
+    foreach (($e['fields'] ?? []) as $row) $f[strtolower(trim($row['label']))] = $row['value'];
+    $pick = function($keys) use ($f) { foreach ($keys as $k) if (isset($f[$k]) && $f[$k] !== '') return $f[$k]; return ''; };
+    $note = '';
+    foreach (($e['sections'] ?? []) as $sec) { if (trim((string)$sec['body']) !== '') { $note = trim((string)$sec['body']); break; } }
+    $type = strtolower(trim((string)($e['type'] ?? '')));
+    if (!in_array($type, source_types(), true)) $type = strtolower($pick(['type']));
+    return save_source($book_id, [
+        'cite_key'  => $e['slug'] ?: $slug,
+        'type'      => $type,
+        'author'    => $pick(['author','authors']),
+        'title'     => $pick(['title']) ?: ($e['name'] ?? ''),
+        'year'      => $pick(['year','date']),
+        'publisher' => $pick(['publisher','journal','publication']),
+        'url'       => $pick(['url','doi','link']),
+        'accessed'  => $pick(['accessed','accessed date','retrieved']),
+        'locator'   => $pick(['locator','page','pages','timestamp']),
+        'note'      => $note,
+    ]);
+}
+
+/** Rebuild claim_sources for a book by scanning every live chapter's prose for
+ *  `[^cite:key]` tokens. Rebuildable cache; safe to run any time. Returns
+ *  ['links'=>N, 'unknown'=>[cite_key => [chapter_file,...]]] where "unknown" are
+ *  cited keys with no matching source — the hook for the P14 "claims to source"
+ *  diagnostic and a gentle "cite to a missing source" warning. */
+function reconcile_citations($book_id) {
+    ensure_sources();
+    q("DELETE FROM claim_sources WHERE book_id=?", [$book_id]);
+    $keyToId = [];
+    foreach (all("SELECT id,cite_key FROM sources WHERE book_id=?", [$book_id]) as $s) $keyToId[$s['cite_key']] = (int)$s['id'];
+    $links = 0; $unknown = [];
+    $chapters = all("SELECT file, body FROM chapters WHERE book_id=? AND status<>'archived' AND LOWER(file) NOT LIKE '%readme.md'", [$book_id]);
+    foreach ($chapters as $ch) {
+        $tokens = md_find_cite_tokens($ch['body']);
+        if (!$tokens) continue;
+        $counts = array_count_values($tokens);   // cite_key => hits in this chapter
+        foreach ($counts as $key => $hits) {
+            $sid = $keyToId[$key] ?? null;
+            q("INSERT INTO claim_sources (book_id,chapter_file,source_id,cite_key,hits) VALUES (?,?,?,?,?)",
+              [$book_id, $ch['file'], $sid, $key, (int)$hits]);
+            $links++;
+            if ($sid === null) $unknown[$key][] = $ch['file'];
+        }
+    }
+    return ['links'=>$links, 'unknown'=>$unknown];
+}
+
+/** Sources cited in one chapter (resolved joined to the source; unresolved keys
+ *  carried with source=null). Ordered by first the resolved, then the orphans. */
+function get_chapter_citations($book_id, $chapter_file) {
+    ensure_sources();
+    $rows = all("SELECT cs.cite_key, cs.hits, cs.source_id, s.type,s.author,s.title,s.year,s.publisher,s.url,s.accessed,s.locator
+                 FROM claim_sources cs LEFT JOIN sources s ON s.id=cs.source_id
+                 WHERE cs.book_id=? AND cs.chapter_file=?
+                 ORDER BY (cs.source_id IS NULL), LOWER(s.author), LOWER(s.title), cs.cite_key", [$book_id, $chapter_file]);
+    return $rows;
+}
+
+/** Chapters that cite a given source (for the References "cited in" list / an
+ *  Appearances-style panel). */
+function get_source_appearances($book_id, $source_id) {
+    ensure_sources();
+    return all("SELECT cs.chapter_file, cs.hits, c.id AS chapter_id, c.num, c.title
+                FROM claim_sources cs LEFT JOIN chapters c ON c.book_id=cs.book_id AND c.file=cs.chapter_file
+                WHERE cs.book_id=? AND cs.source_id=?
+                ORDER BY (c.num+0), c.num", [$book_id, (int)$source_id]);
+}
+
+/** The References view data: every source with how many chapters cite it and the
+ *  total hit count. */
+function get_references($book_id) {
+    ensure_sources();
+    $out = [];
+    foreach (get_sources($book_id) as $s) {
+        $s['chapterCount'] = (int) val("SELECT COUNT(DISTINCT chapter_file) FROM claim_sources WHERE book_id=? AND source_id=?", [$book_id, $s['id']]);
+        $s['citeCount']    = (int) val("SELECT COALESCE(SUM(hits),0) FROM claim_sources WHERE book_id=? AND source_id=?", [$book_id, $s['id']]);
+        $out[] = $s;
+    }
+    return $out;
+}
+
+/** Cite keys used in prose that have no matching source, book-wide. */
+function get_orphan_citations($book_id) {
+    ensure_sources();
+    return all("SELECT cite_key, COUNT(DISTINCT chapter_file) AS chapters, COALESCE(SUM(hits),0) AS hits
+                FROM claim_sources WHERE book_id=? AND source_id IS NULL GROUP BY cite_key ORDER BY cite_key", [$book_id]);
+}
+
+/** A human-readable reference string (a light, house-style citation). */
+function format_citation($s) {
+    $bits = [];
+    $author = trim((string)($s['author'] ?? ''));
+    $year   = trim((string)($s['year'] ?? ''));
+    $title  = trim((string)($s['title'] ?? ''));
+    $pub    = trim((string)($s['publisher'] ?? ''));
+    if ($author !== '') $bits[] = $author . ($year !== '' ? " ($year)" : '');
+    elseif ($year !== '') $bits[] = "($year)";
+    if ($title !== '') $bits[] = ($s['type'] ?? '') === 'article' ? '“' . $title . '”' : $title;
+    if ($pub !== '') $bits[] = $pub;
+    $out = implode('. ', array_filter($bits));
+    if ($out === '') $out = (string)($s['cite_key'] ?? 'untitled source');
+    return $out;
+}

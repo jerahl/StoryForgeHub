@@ -55,6 +55,14 @@ function inline_md($s) {
         }
         return '<span class="relchip">' . e($label) . '</span>';
     }, $s);
+    // Phase 12: render [^cite:key] citation tokens as a superscript reference marker
+    // linking to the References view. Fiction prose has none, so this is inert there.
+    $s = preg_replace_callback('/\[\^cite:([A-Za-z0-9._-]+)\]/', function($m) use ($bid) {
+        $key = $m[1];
+        $inner = '<sup class="cite">[' . e($key) . ']</sup>';
+        if ($bid) return '<a class="citeref" href="' . url(['p'=>'references','book'=>$bid]) . '#src-' . rawurlencode($key) . '" title="Source: ' . e($key) . '">' . $inner . '</a>';
+        return $inner;
+    }, $s);
     return $s;
 }
 
@@ -168,6 +176,9 @@ function render_sidebar($book, $active, $activeDb = null) {
           <span class="sq" style="background:<?=$m['hue']?>"></span><?=$m['title']?><span class="count"><?=$c?></span></a>
       <?php endforeach ?>
       <a class="navitem <?= $active==='manuscript'?'active':'' ?>" href="<?=url(['p'=>'manuscript','book'=>$bid])?>"><span class="sq" style="background:#8A6A3E"></span>Manuscript<span class="count"><?=$book['chapterCount']?></span></a>
+      <?php if (profile_has_references($book['profile'] ?? 'fiction')): ensure_sources(); $srcN=(int)val("SELECT COUNT(*) FROM sources WHERE book_id=?",[$bid]); ?>
+      <a class="navitem <?= $active==='references'?'active':'' ?>" href="<?=url(['p'=>'references','book'=>$bid])?>"><span class="sq" style="background:#3D7D80"></span>References<?php if($srcN):?><span class="count"><?=$srcN?></span><?php endif?></a>
+      <?php endif ?>
       <a class="navitem <?= $active==='diagnostics'?'active':'' ?>" href="<?=url(['p'=>'diagnostics','book'=>$bid])?>"><span class="dot" style="background:#5E8CA8"></span>Diagnostics</a>
       <a class="navitem <?= $active==='progressions'?'active':'' ?>" href="<?=url(['p'=>'progressions','book'=>$bid])?>"><span class="dot" style="background:#C9933A"></span>Progressions</a>
       <a class="navitem <?= $active==='timeline'?'active':'' ?>" href="<?=url(['p'=>'timeline','book'=>$bid])?>"><span class="dot" style="background:#B07A2E"></span>Timeline</a>

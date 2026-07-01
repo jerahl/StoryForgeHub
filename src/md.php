@@ -35,6 +35,16 @@ function md_find_links($s) {
     return $m[1];
 }
 
+/** Citation tokens (Phase 12): `[^cite:key]` footnote-style markers embedded in
+ *  prose. They are ordinary Markdown, so they round-trip untouched through the
+ *  parser and the folder sync — the prose file stays the source of truth. Returns
+ *  the cite_keys referenced, in document order (duplicates preserved so callers
+ *  can count hits per chapter). */
+function md_find_cite_tokens($s) {
+    preg_match_all('/\[\^cite:([A-Za-z0-9._-]+)\]/', (string)$s, $m);
+    return $m[1];
+}
+
 /** Parse Codex markdown text into a structured entry array. */
 function md_parse_entry($raw, $db, $fallback_slug = '') {
     $raw = str_replace("\x00", '', $raw);

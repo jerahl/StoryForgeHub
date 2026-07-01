@@ -48,8 +48,9 @@ const PROFILES = [
 
     'nonfiction' => [
         'label' => 'Non-fiction',
-        'desc'  => 'Researched non-fiction — concepts, people, sources, organizations, methods.',
-        'dbKeys' => ['concepts','people','sources','organizations','methods'],
+        'desc'  => 'Researched non-fiction — concepts, people, organizations, methods.',
+        'references' => true,   // Sources are a dedicated table + References view (Phase 12)
+        'dbKeys' => ['concepts','people','organizations','methods'],
         'databases' => [
             'concepts'      => ['title'=>'Concepts','singular'=>'Concept','letter'=>'C','hue'=>'#7A5AA0','folder'=>'Concepts','detailLabel'=>'Domain','desc'=>'Frameworks and ideas — the spine of the book and the claims it develops.'],
             'people'        => ['title'=>'People','singular'=>'Person','letter'=>'P','hue'=>'#5b54b8','folder'=>'People','detailLabel'=>'Affiliation','desc'=>'Real people — interview subjects, researchers, historical figures, exemplars.'],
@@ -74,7 +75,8 @@ const PROFILES = [
     'selfhelp' => [
         'label' => 'Self-help',
         'desc'  => 'Non-fiction plus a reader-facing layer — concepts, methods, and exercises.',
-        'dbKeys' => ['concepts','methods','people','sources','organizations','exercises'],
+        'references' => true,
+        'dbKeys' => ['concepts','methods','people','organizations','exercises'],
         'databases' => [
             'concepts'      => ['title'=>'Concepts','singular'=>'Concept','letter'=>'C','hue'=>'#7A5AA0','folder'=>'Concepts','detailLabel'=>'Domain','desc'=>'The ideas the book teaches and the promises they support.'],
             'methods'       => ['title'=>'Methods','singular'=>'Method','letter'=>'M','hue'=>'#4F7A52','folder'=>'Methods','detailLabel'=>'Class','desc'=>'The named processes, frameworks, and "3-step" tools the book sells.'],
@@ -97,8 +99,9 @@ const PROFILES = [
 
     'memoir' => [
         'label' => 'Memoir',
-        'desc'  => 'Narrative non-fiction — real people, places, themes, and sources.',
-        'dbKeys' => ['people','places','themes','sources'],
+        'desc'  => 'Narrative non-fiction — real people, places, and themes.',
+        'references' => true,
+        'dbKeys' => ['people','places','themes'],
         'databases' => [
             'people'  => ['title'=>'People','singular'=>'Person','letter'=>'P','hue'=>'#5b54b8','folder'=>'People','detailLabel'=>'Relationship','desc'=>'The real people in your story — family, friends, figures who shaped it.'],
             'places'  => ['title'=>'Places','singular'=>'Place','letter'=>'L','hue'=>'#4F7A52','folder'=>'Places','detailLabel'=>'Scale','desc'=>'The real locations the memoir moves through.'],
@@ -126,6 +129,9 @@ function profile_exists($p) { return is_string($p) && isset(PROFILES[$p]); }
 function normalize_profile($p) { return profile_exists($p) ? $p : profile_default(); }
 function profile_label($p) { return PROFILES[normalize_profile($p)]['label']; }
 function profile_desc($p)  { return PROFILES[normalize_profile($p)]['desc'] ?? ''; }
+/** Whether this profile uses the Sources & citations engine / References view
+ *  (Phase 12). Fiction does not; the non-fiction family does. */
+function profile_has_references($p) { return !empty(PROFILES[normalize_profile($p)]['references']); }
 
 /** Ordered db_key list shown in the codex nav for this profile. */
 function db_keys_for($p) {
@@ -178,6 +184,7 @@ function folder_db_map() {
     if ($m !== null) return $m;
     $m = [];
     foreach (all_dbmeta() as $k => $meta) {
+        if ($k === 'sources') continue;   // Sources are a dedicated table (Phase 12), not generic entries
         $f = $meta['folder'] ?? '';
         if ($f !== '' && !isset($m[$f])) $m[$f] = $k;
     }

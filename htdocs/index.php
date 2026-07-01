@@ -187,6 +187,24 @@ if ($method === 'POST') {
         flash('Book profile set to “'.profile_label($_POST['profile'] ?? 'fiction').'”.');
         redirect(['p'=>'book','book'=>$book]);
     }
+    if ($a === 'source_save') {
+        $sid = save_source($book, [
+            'id'=>$_POST['id']??'', 'cite_key'=>$_POST['cite_key']??'', 'type'=>$_POST['type']??'web',
+            'author'=>$_POST['author']??'', 'title'=>$_POST['title']??'', 'year'=>$_POST['year']??'',
+            'publisher'=>$_POST['publisher']??'', 'url'=>$_POST['url']??'', 'accessed'=>$_POST['accessed']??'',
+            'locator'=>$_POST['locator']??'', 'note'=>$_POST['note']??'',
+        ]);
+        reconcile_citations($book);   // a new/edited source can resolve orphan cite keys
+        $src = get_source($book, $sid);
+        flash('Saved source “'.($src ? format_citation($src) : ($_POST['cite_key']??'')).'”.');
+        redirect(['p'=>'references','book'=>$book]);
+    }
+    if ($a === 'source_delete') {
+        delete_source($book, (int)($_POST['id']??0));
+        reconcile_citations($book);
+        flash('Source deleted; any [^cite:…] tokens now show as unresolved.');
+        redirect(['p'=>'references','book'=>$book]);
+    }
     if ($a === 'act_add')   { add_act($book, $_POST['title'] ?? ''); redirect(['p'=>'manuscript','book'=>$book,'view'=>'grid']); }
     if ($a === 'act_rename'){ rename_act((int)($_POST['id'] ?? 0), $book, $_POST['title'] ?? '', $_POST['subtitle'] ?? ''); redirect(['p'=>'manuscript','book'=>$book,'view'=>'grid']); }
     if ($a === 'act_delete'){ delete_act((int)($_POST['id'] ?? 0), $book); flash('Act deleted; its chapters are now unassigned.'); redirect(['p'=>'manuscript','book'=>$book,'view'=>'grid']); }
@@ -453,6 +471,62 @@ case 'book':
     if ($prog) { echo '<h2 style="font-size:15px;margin-top:26px">Latest progressions</h2><table class="grid"><tr><th>Chapter</th><th>What happened</th></tr>';
         foreach (array_slice($prog, -8) as $pr) echo '<tr><td class="mono">'.e($pr['chapter']).'</td><td>'.inline_md($pr['what']).'</td></tr>';
         echo '</table>'; }
+    break;
+
+case 'references':
+    // Phase 12: the References view — sources for the book + a per-source "cited in"
+    // list, plus an add/edit form. Cite a passage in prose with [^cite:key]; the
+    // key resolves against a source's cite_key.
+    $refs = get_references($book['id']);
+    $orphans = get_orphan_citations($book['id']);
+    $edit = isset($_GET['edit']) ? get_source($book['id'], (int)$_GET['edit']) : null;
+    $prefillKey = $edit ? $edit['cite_key'] : ($_GET['key'] ?? '');
+    echo '<div class="pagehead"><div><h1>References</h1><p class="desc">Sources behind this book\'s claims. Cite a passage in your prose with <code>[^cite:key]</code> — the key resolves to a source here, and the folder file stays the source of truth.</p></div></div>';
+
+    if ($orphans) {
+        echo '<div class="flash err" style="text-align:left">Cited in prose but not yet defined as a source: ';
+        $bits = [];
+        foreach ($orphans as $o) $bits[] = '<a href="'.url(['p'=>'references','book'=>$book['id'],'key'=>$o['cite_key']]).'#addsource"><code>'.e($o['cite_key']).'</code></a> <span class="muted">('.(int)$o['chapters'].' ch)</span>';
+        echo implode(' · ', $bits).'. Add each below to resolve it.</div>';
+    }
+
+    if ($refs) {
+        echo '<table class="grid"><tr><th>Reference</th><th>Type</th><th>Key</th><th>Cited in</th><th></th></tr>';
+        foreach ($refs as $s) {
+            echo '<tr id="src-'.e($s['cite_key']).'"><td><strong>'.e(format_citation($s)).'</strong>'
+               . ($s['url']!==''?' <a class="muted mono" href="'.e($s['url']).'" target="_blank" rel="noopener">link</a>':'')
+               . ($s['note']!==''?'<div class="clog">'.inline_md($s['note']).'</div>':'').'</td>';
+            echo '<td><span class="pill">'.e($s['type']).'</span></td><td class="mono">'.e($s['cite_key']).'</td>';
+            $apps = get_source_appearances($book['id'], $s['id']);
+            echo '<td>';
+            if ($apps) { $links=[]; foreach ($apps as $ap) { $lab = $ap['chapter_id'] ? url(['p'=>'chapter','book'=>$book['id'],'id'=>$ap['chapter_id']]) : ''; $t = 'Ch '.e($ap['num']).' ×'.(int)$ap['hits']; $links[] = $lab ? '<a href="'.$lab.'">'.$t.'</a>' : $t; } echo implode(', ', $links); }
+            else echo '<span class="muted">—</span>';
+            echo '</td>';
+            echo '<td class="mono"><a class="btn sm" href="'.url(['p'=>'references','book'=>$book['id'],'edit'=>$s['id']]).'#addsource">Edit</a> '
+               . '<form method="post" style="display:inline" onsubmit="return confirm(\'Delete this source?\')"><input type="hidden" name="action" value="source_delete"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="id" value="'.(int)$s['id'].'"><button class="btn sm danger">×</button></form></td></tr>';
+        }
+        echo '</table>';
+    } else echo '<p class="empty">No sources yet. Add one below, or author them as <span class="mono">Codex/Sources/&lt;key&gt;.md</span> and sync.</p>';
+
+    // add / edit form
+    echo '<div class="notewrap" id="addsource" style="margin-top:22px"><form method="post"><input type="hidden" name="action" value="source_save"><input type="hidden" name="book" value="'.e($book['id']).'">';
+    if ($edit) echo '<input type="hidden" name="id" value="'.(int)$edit['id'].'">';
+    echo '<h2 style="font-size:15px;margin:0 0 8px">'.($edit?'Edit source':'Add a source').'</h2>';
+    echo '<div class="formrow"><div><label class="f">Cite key</label><input type="text" name="cite_key" placeholder="keynes-1936" value="'.e($edit['cite_key'] ?? $prefillKey).'"></div>';
+    echo '<div><label class="f">Type</label><select name="type">';
+    foreach (source_types() as $t) echo '<option value="'.$t.'"'.((($edit['type'] ?? 'web')===$t)?' selected':'').'>'.ucfirst($t).'</option>';
+    echo '</select></div></div>';
+    echo '<label class="f">Author</label><input type="text" name="author" value="'.e($edit['author'] ?? '').'">';
+    echo '<label class="f">Title</label><input type="text" name="title" value="'.e($edit['title'] ?? '').'">';
+    echo '<div class="formrow"><div><label class="f">Year</label><input type="text" name="year" value="'.e($edit['year'] ?? '').'"></div>';
+    echo '<div><label class="f">Publisher / journal</label><input type="text" name="publisher" value="'.e($edit['publisher'] ?? '').'"></div></div>';
+    echo '<label class="f">URL / DOI</label><input type="text" name="url" value="'.e($edit['url'] ?? '').'">';
+    echo '<div class="formrow"><div><label class="f">Accessed</label><input type="text" name="accessed" placeholder="2026-07-01" value="'.e($edit['accessed'] ?? '').'"></div>';
+    echo '<div><label class="f">Locator (page / timestamp)</label><input type="text" name="locator" value="'.e($edit['locator'] ?? '').'"></div></div>';
+    echo '<label class="f">Note (optional)</label><textarea name="note" style="min-height:56px">'.e($edit['note'] ?? '').'</textarea>';
+    echo '<div class="toolbar"><button class="btn primary">'.($edit?'Save changes':'Add source').'</button>';
+    if ($edit) echo '<a class="btn" href="'.url(['p'=>'references','book'=>$book['id']]).'">Cancel</a>';
+    echo '</div></form></div>';
     break;
 
 case 'db':
@@ -870,6 +944,20 @@ case 'chapter':
            . '<div class="sr-empty" id="srEmpty">No Codex names detected yet.</div>'
            . '<div class="sr-note">Mentions update live as you write. Names from your Codex auto-link.</div></aside>';
         echo '</div>';
+        // --- Phase 12: citations in this chapter (from [^cite:key] tokens) ---
+        $cites = get_chapter_citations($book['id'], $c['file']);
+        if ($cites) {
+            echo '<div class="entrybody"><h2>Citations <span class="muted mono">'.count($cites).'</span></h2><ol class="refs">';
+            foreach ($cites as $ci) {
+                $hits = (int)$ci['hits'] > 1 ? ' <span class="muted mono">×'.(int)$ci['hits'].'</span>' : '';
+                if ($ci['source_id']) {
+                    echo '<li><a href="'.url(['p'=>'references','book'=>$book['id']]).'#src-'.rawurlencode($ci['cite_key']).'">'.e(format_citation($ci)).'</a>'.$hits.'</li>';
+                } else {
+                    echo '<li><code>'.e($ci['cite_key']).'</code> <span class="pill err">unresolved</span> — <a href="'.url(['p'=>'references','book'=>$book['id'],'key'=>$ci['cite_key']]).'#addsource">add source</a>'.$hits.'</li>';
+                }
+            }
+            echo '</ol></div>';
+        }
         // data for the client-side tally: targets (longest-first), entity map, db colours
         if (function_exists('build_mention_targets')) {
             $emeta = []; $dbcolor = [];

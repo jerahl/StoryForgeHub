@@ -42,9 +42,11 @@ DBMETA = {
     "themes":        {"title": "Themes",        "singular": "Theme",        "letter": "T", "hue": "#A85648", "folder": "Themes",        "detailLabel": "Kind"},
 }
 
-# db keys to scan, fiction first (dict preserves insertion order). A book only has
-# the folders of its own profile, so the extra keys are empty globs elsewhere.
-DBS = list(DBMETA.keys())
+# db keys to scan as generic entries, fiction first (dict preserves insertion
+# order). A book only has the folders of its own profile, so the extra keys are
+# empty globs elsewhere. "sources" is EXCLUDED: Codex/Sources/*.md is a dedicated
+# citations table on the web side (Phase 12), not a generic entry database.
+DBS = [k for k in DBMETA if k != "sources"]
 
 STATUS_VALUES = ["seed", "sketch", "canon"]
 
