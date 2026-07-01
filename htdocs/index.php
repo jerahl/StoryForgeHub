@@ -1326,7 +1326,7 @@ case 'chapter_edit':
   .ed-note{border:1px solid var(--line,#e4e0d8);border-radius:7px;padding:7px 9px;margin:6px 0;font-size:12px}
   .ed-note-q{font-style:italic;color:var(--ink,#2c2a26);margin-bottom:3px}
   .ed-note-n{color:var(--muted,#6b6253)}
-  .md-toolbar{display:flex;gap:2px;align-items:center;flex-wrap:wrap;margin:0 0 6px;padding:4px;border:1px solid var(--line,#e4e0d8);border-radius:8px;background:var(--card,#fff)}
+  .md-toolbar{display:flex;gap:2px;align-items:center;flex-wrap:wrap;margin:0 0 6px;padding:4px;border:1px solid var(--line,#e4e0d8);border-radius:8px}
   .md-toolbar button{min-width:30px;height:30px;padding:0 8px;border:0;border-radius:6px;background:none;cursor:pointer;
     font:600 14px/1 var(--body-font);color:var(--ink,#2c2a26)}
   .md-toolbar button:hover{background:var(--accent-soft,#f6f3ee)}
