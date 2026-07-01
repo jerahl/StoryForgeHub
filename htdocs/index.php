@@ -318,7 +318,9 @@ if (!$book && !in_array($p, ['library','sync','overview'], true)) { $bks = get_b
 $GLOBALS['__link_book'] = $book_id;
 
 $titles = ['overview'=>'Overview','library'=>'Library','book'=>$book['title']??'Book','db'=>'Database','entry'=>'Entry',
-           'manuscript'=>'Manuscript','chapter'=>'Chapter','chapter_edit'=>'Edit chapter','diagnostics'=>'Diagnostics','progressions'=>'Progressions','timeline'=>'Timeline','threads'=>'Open threads',
+           'manuscript'=>'Manuscript','chapter'=>'Chapter','chapter_edit'=>'Edit chapter','diagnostics'=>'Diagnostics','progressions'=>'Progressions','timeline'=>'Timeline',
+           'threads'=>($book ? threads_label($book['profile'] ?? 'fiction')['title'] : 'Open threads'),
+           'references'=>'References','exercises'=>'Exercises',
            'tasks'=>'Tasks','log'=>'Writing log','meta'=>'Meta','notes'=>'Notes','sync'=>'Sync',
            'plot'=>'Plot board','vision'=>'Mood board'];
 layout_head($titles[$p] ?? 'Codex', $accent, $bodyType, $density, $mode);
@@ -453,7 +455,7 @@ case 'book':
     $sections = [
         ['manuscript','Manuscript','#8A6A3E',$book['chapterCount'],'Read chapters, set status, track word counts.'],
         ['progressions','Progressions','#C9933A',$progN,'Confirmed story movement, chapter by chapter.'],
-        ['threads','Open threads','#C25A6E',$book['threadCount'],'Unresolved questions pulled from entries.'],
+        ['threads',threads_label($bprofile)['title'],'#C25A6E',$book['threadCount'],threads_label($bprofile)['desc']],
         ['tasks','Tasks','#5b54b8',$book['taskCount'],'To-dos — flag any for Claude to run.'],
         ['log','Writing log','#4F7A52',$logN,'Writing sessions and word deltas.'],
         ['meta','Meta','#7A715F',$metaN,'Workspace rules and notes for this book.'],
@@ -527,6 +529,37 @@ case 'references':
     echo '<div class="toolbar"><button class="btn primary">'.($edit?'Save changes':'Add source').'</button>';
     if ($edit) echo '<a class="btn" href="'.url(['p'=>'references','book'=>$book['id']]).'">Cancel</a>';
     echo '</div></form></div>';
+    break;
+
+case 'exercises':
+    // Phase 13: the self-help Workbook — takeaways + exercises per chapter, all
+    // derived from prose. index_exercises() backfills chapters synced before P13.
+    index_exercises($book['id']);
+    $wb = get_workbook($book['id']);
+    $exN = count_exercises($book['id']);
+    echo '<div class="pagehead"><div><h1>Exercises &amp; workbook</h1><p class="desc">'.$exN.' exercise'.($exN==1?'':'s').' across the book, plus each chapter\'s takeaways. Authored in your prose as <code>## Exercise</code> blocks and <code>## Takeaways</code> lists — the folder stays the source of truth.</p></div></div>';
+    if (!$wb) { echo '<p class="empty">No exercises or takeaways found yet. Add a <span class="mono">## Exercise</span> section or a <span class="mono">## Takeaways</span> list to a chapter, then sync.</p>'; break; }
+    foreach ($wb as $w) {
+        $ch = $w['chapter'];
+        echo '<div class="entrybody" style="margin-bottom:18px"><h2 style="margin-top:0"><a href="'.url(['p'=>'chapter','book'=>$book['id'],'id'=>$ch['id']]).'"><span class="mono">'.e($ch['num']).'</span> '.e($ch['title']).'</a></h2>';
+        if ($w['takeaways']) {
+            echo '<div class="sp-label">Takeaways</div><ul>';
+            foreach ($w['takeaways'] as $t) echo '<li>'.inline_md($t).'</li>';
+            echo '</ul>';
+        }
+        foreach ($w['exercises'] as $ex) {
+            echo '<div class="exercise" style="border:1px solid var(--accent-soft,#ddd);border-radius:8px;padding:10px 12px;margin:10px 0">';
+            echo '<div class="cmeta"><strong>'.e($ex['title']).'</strong>';
+            if ($ex['type'] !== '') echo ' <span class="pill">'.e($ex['type']).'</span>';
+            if ($ex['est_time'] !== '') echo ' <span class="muted mono">'.e($ex['est_time']).'</span>';
+            if ($ex['operationalizes'] !== '') { $op=one("SELECT db_key,name FROM entries WHERE book_id=? AND slug=?",[$book['id'],$ex['operationalizes']]);
+                echo ' <span class="muted">→ '.($op?'<a href="'.url(['p'=>'entry','book'=>$book['id'],'db'=>$op['db_key'],'slug'=>$ex['operationalizes']]).'">'.e($op['name']).'</a>':e($ex['operationalizes'])).'</span>'; }
+            echo '</div>';
+            if (trim((string)$ex['prompt']) !== '') echo '<div class="clog">'.md_to_html($ex['prompt'], $book['id']).'</div>';
+            echo '</div>';
+        }
+        echo '</div>';
+    }
     break;
 
 case 'db':
@@ -958,6 +991,30 @@ case 'chapter':
             }
             echo '</ol></div>';
         }
+        // --- Phase 13: takeaways + exercises for this chapter (derived from prose) ---
+        $takeaways = get_chapter_takeaways($c['body']);
+        if ($takeaways) {
+            echo '<div class="entrybody"><h2>Takeaways</h2><ul>';
+            foreach ($takeaways as $t) echo '<li>'.inline_md($t).'</li>';
+            echo '</ul></div>';
+        }
+        reconcile_exercises($book['id'], (int)$c['id'], $c['body']);   // keep in sync on view
+        $chEx = get_chapter_exercises((int)$c['id']);
+        if ($chEx) {
+            echo '<div class="entrybody"><h2>Exercises <span class="muted mono">'.count($chEx).'</span></h2>';
+            foreach ($chEx as $ex) {
+                echo '<div class="exercise" style="border:1px solid var(--accent-soft,#ddd);border-radius:8px;padding:10px 12px;margin:10px 0">';
+                echo '<div class="cmeta"><strong>'.e($ex['title']).'</strong>';
+                if ($ex['type'] !== '') echo ' <span class="pill">'.e($ex['type']).'</span>';
+                if ($ex['est_time'] !== '') echo ' <span class="muted mono">'.e($ex['est_time']).'</span>';
+                if ($ex['operationalizes'] !== '') { $op=one("SELECT db_key,name FROM entries WHERE book_id=? AND slug=?",[$book['id'],$ex['operationalizes']]);
+                    echo ' <span class="muted">→ '.($op?'<a href="'.url(['p'=>'entry','book'=>$book['id'],'db'=>$op['db_key'],'slug'=>$ex['operationalizes']]).'">'.e($op['name']).'</a>':e($ex['operationalizes'])).'</span>'; }
+                echo '</div>';
+                if (trim((string)$ex['prompt']) !== '') echo '<div class="clog">'.md_to_html($ex['prompt'], $book['id']).'</div>';
+                echo '</div>';
+            }
+            echo '</div>';
+        }
         // data for the client-side tally: targets (longest-first), entity map, db colours
         if (function_exists('build_mention_targets')) {
             $emeta = []; $dbcolor = [];
@@ -1313,7 +1370,8 @@ case 'diagnostics':
 
 case 'threads':
     $open = get_threads($book['id'], 'open'); $res = get_threads($book['id'], 'resolved');
-    echo '<div class="pagehead"><div><h1>Open threads</h1><p class="desc">'.count($open).' open · '.count($res).' resolved. Threads are pulled from each entry’s “Open Threads” section.</p></div></div>';
+    $tl = threads_label($book['profile'] ?? 'fiction');
+    echo '<div class="pagehead"><div><h1>'.e($tl['title']).'</h1><p class="desc">'.count($open).' open · '.count($res).' resolved. '.e($tl['desc']).' Pulled from each entry’s “Open Threads” section.</p></div></div>';
     echo '<table class="grid"><tr><th>Entry</th><th>Thread</th><th></th></tr>';
     foreach ($open as $t) {
         echo '<tr><td><a href="'.url(['p'=>'entry','book'=>$book['id'],'db'=>$t['db_key'],'slug'=>$t['entry_slug']]).'">'.e($t['entry_name']).'</a></td><td>'.inline_md($t['text']).'</td>';

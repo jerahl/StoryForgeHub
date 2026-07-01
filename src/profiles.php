@@ -76,7 +76,11 @@ const PROFILES = [
         'label' => 'Self-help',
         'desc'  => 'Non-fiction plus a reader-facing layer — concepts, methods, and exercises.',
         'references' => true,
-        'dbKeys' => ['concepts','methods','people','organizations','exercises'],
+        'exercises' => true,   // exercises + workbook view (Phase 13)
+        // reframe the threads tracker as reader promises (Phase 13)
+        'threadsLabel' => ['nav'=>'Promises', 'title'=>'Promises to the reader', 'singular'=>'promise',
+                           'desc'=>'Promises the book makes to the reader — an open one that never pays off is a structural bug.'],
+        'dbKeys' => ['concepts','methods','people','organizations'],
         'databases' => [
             'concepts'      => ['title'=>'Concepts','singular'=>'Concept','letter'=>'C','hue'=>'#7A5AA0','folder'=>'Concepts','detailLabel'=>'Domain','desc'=>'The ideas the book teaches and the promises they support.'],
             'methods'       => ['title'=>'Methods','singular'=>'Method','letter'=>'M','hue'=>'#4F7A52','folder'=>'Methods','detailLabel'=>'Class','desc'=>'The named processes, frameworks, and "3-step" tools the book sells.'],
@@ -132,6 +136,15 @@ function profile_desc($p)  { return PROFILES[normalize_profile($p)]['desc'] ?? '
 /** Whether this profile uses the Sources & citations engine / References view
  *  (Phase 12). Fiction does not; the non-fiction family does. */
 function profile_has_references($p) { return !empty(PROFILES[normalize_profile($p)]['references']); }
+/** Whether this profile surfaces the self-help Exercises / Workbook view (Phase 13). */
+function profile_has_exercises($p) { return !empty(PROFILES[normalize_profile($p)]['exercises']); }
+/** Label bundle for the threads tracker — self-help reframes it as reader promises
+ *  (Phase 13). Always returns nav/title/singular/desc. */
+function threads_label($p) {
+    $l = PROFILES[normalize_profile($p)]['threadsLabel'] ?? [];
+    return $l + ['nav'=>'Open threads', 'title'=>'Open threads', 'singular'=>'thread',
+                 'desc'=>'Unresolved questions pulled from entries.'];
+}
 
 /** Ordered db_key list shown in the codex nav for this profile. */
 function db_keys_for($p) {
@@ -184,7 +197,9 @@ function folder_db_map() {
     if ($m !== null) return $m;
     $m = [];
     foreach (all_dbmeta() as $k => $meta) {
-        if ($k === 'sources') continue;   // Sources are a dedicated table (Phase 12), not generic entries
+        // Sources (Phase 12) and Exercises (Phase 13) are dedicated / prose-derived,
+        // never generic entries — keep their folder names out of the entry sync.
+        if ($k === 'sources' || $k === 'exercises') continue;
         $f = $meta['folder'] ?? '';
         if ($f !== '' && !isset($m[$f])) $m[$f] = $k;
     }

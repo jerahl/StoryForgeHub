@@ -25,7 +25,8 @@ foreach ($books as $b) {
     $c = reindex_prose($b['id']);                   // Phase 7: prose diagnostics cache
     $cit = reconcile_citations($b['id']);           // Phase 12: rebuild claim_sources from cite tokens
     $orphans = count($cit['unknown']);
-    fwrite(STDOUT, "  {$b['id']}: {$n} mentions, {$c} chapters analyzed, {$cit['links']} citations" . ($orphans ? " ({$orphans} unresolved)" : "") . "\n");
+    $ex = index_exercises($b['id']);                // Phase 13: rebuild exercises from prose
+    fwrite(STDOUT, "  {$b['id']}: {$n} mentions, {$c} chapters analyzed, {$cit['links']} citations" . ($orphans ? " ({$orphans} unresolved)" : "") . ", {$ex} exercises\n");
     $total += $n; $chaps += $c;
 }
 fwrite(STDOUT, "reindex complete: {$total} mentions + {$chaps} chapter analyses across " . count($books) . " book(s)\n");

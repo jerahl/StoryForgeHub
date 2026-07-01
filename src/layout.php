@@ -179,10 +179,13 @@ function render_sidebar($book, $active, $activeDb = null) {
       <?php if (profile_has_references($book['profile'] ?? 'fiction')): ensure_sources(); $srcN=(int)val("SELECT COUNT(*) FROM sources WHERE book_id=?",[$bid]); ?>
       <a class="navitem <?= $active==='references'?'active':'' ?>" href="<?=url(['p'=>'references','book'=>$bid])?>"><span class="sq" style="background:#3D7D80"></span>References<?php if($srcN):?><span class="count"><?=$srcN?></span><?php endif?></a>
       <?php endif ?>
+      <?php if (profile_has_exercises($book['profile'] ?? 'fiction')): $exN=count_exercises($bid); ?>
+      <a class="navitem <?= $active==='exercises'?'active':'' ?>" href="<?=url(['p'=>'exercises','book'=>$bid])?>"><span class="sq" style="background:#C9933A"></span>Exercises<?php if($exN):?><span class="count"><?=$exN?></span><?php endif?></a>
+      <?php endif ?>
       <a class="navitem <?= $active==='diagnostics'?'active':'' ?>" href="<?=url(['p'=>'diagnostics','book'=>$bid])?>"><span class="dot" style="background:#5E8CA8"></span>Diagnostics</a>
       <a class="navitem <?= $active==='progressions'?'active':'' ?>" href="<?=url(['p'=>'progressions','book'=>$bid])?>"><span class="dot" style="background:#C9933A"></span>Progressions</a>
       <a class="navitem <?= $active==='timeline'?'active':'' ?>" href="<?=url(['p'=>'timeline','book'=>$bid])?>"><span class="dot" style="background:#B07A2E"></span>Timeline</a>
-      <a class="navitem <?= $active==='threads'?'active':'' ?>" href="<?=url(['p'=>'threads','book'=>$bid])?>"><span class="dot" style="background:#C25A6E"></span>Open threads<span class="count"><?=$book['threadCount']?></span></a>
+      <a class="navitem <?= $active==='threads'?'active':'' ?>" href="<?=url(['p'=>'threads','book'=>$bid])?>"><span class="dot" style="background:#C25A6E"></span><?=e(threads_label($book['profile'] ?? 'fiction')['nav'])?><span class="count"><?=$book['threadCount']?></span></a>
 
       <div class="navgroup">Work</div>
       <a class="navitem <?= $active==='tasks'?'active':'' ?>" href="<?=url(['p'=>'tasks','book'=>$bid])?>"><span class="dot" style="background:#5b54b8"></span>Tasks<?php if($book['taskCount']):?><span class="count"><?=$book['taskCount']?></span><?php endif?></a>

@@ -44,9 +44,10 @@ DBMETA = {
 
 # db keys to scan as generic entries, fiction first (dict preserves insertion
 # order). A book only has the folders of its own profile, so the extra keys are
-# empty globs elsewhere. "sources" is EXCLUDED: Codex/Sources/*.md is a dedicated
-# citations table on the web side (Phase 12), not a generic entry database.
-DBS = [k for k in DBMETA if k != "sources"]
+# empty globs elsewhere. EXCLUDED on the web side: "sources" is a dedicated
+# citations table (Phase 12) and "exercises" are derived from chapter prose
+# (Phase 13) — neither is a generic entry database.
+DBS = [k for k in DBMETA if k not in ("sources", "exercises")]
 
 STATUS_VALUES = ["seed", "sketch", "canon"]
 

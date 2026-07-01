@@ -95,6 +95,10 @@ function migrate() {
 "claim_sources" => "(
   id $pk, book_id VARCHAR(40) NOT NULL, chapter_file VARCHAR(255) NOT NULL, source_id INT DEFAULT NULL,
   cite_key VARCHAR(160) NOT NULL, hits INT DEFAULT 1, created_at $now )",
+"exercises" => "(
+  id $pk, book_id VARCHAR(40) NOT NULL, chapter_id INT NOT NULL, ordinal INT DEFAULT 1,
+  title VARCHAR(255) DEFAULT '', type VARCHAR(40) DEFAULT '', est_time VARCHAR(60) DEFAULT '',
+  operationalizes VARCHAR(160) DEFAULT '', prompt MEDIUMTEXT, updated_at $now )",
     ];
     foreach ($tables as $name => $cols) {
         db()->exec("CREATE TABLE IF NOT EXISTS $name $cols");
@@ -123,6 +127,8 @@ function migrate() {
         "CREATE UNIQUE INDEX uniq_source ON sources (book_id, cite_key)",
         "CREATE INDEX k_claim_book_file ON claim_sources (book_id, chapter_file)",
         "CREATE INDEX k_claim_src ON claim_sources (source_id)",
+        "CREATE INDEX k_ex_ch ON exercises (chapter_id)",
+        "CREATE INDEX k_ex_book ON exercises (book_id)",
     ];
     foreach ($idx as $s) { try { db()->exec($s); } catch (Exception $e) {} }
 }

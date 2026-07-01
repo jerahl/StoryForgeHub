@@ -230,6 +230,7 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     $wc = md_word_count($new_md);
     q("UPDATE chapters SET body=?, word_count=?, words=? WHERE id=?", [$new_md, $wc, number_format($wc), (int)$chapter_id]);
     reconcile_scenes($book_id, (int)$chapter_id, $new_md);
+    reconcile_exercises($book_id, (int)$chapter_id, $new_md);   // Phase 13
     reconcile_citations($book_id);   // Phase 12: prose edit may add/remove [^cite:key] tokens
     return ['status'=>'ok', 'msg'=>'Saved to the manuscript file and database.'];
 }
@@ -899,6 +900,7 @@ function upsert_chapter_from_md($book_id, $file, $content) {
     // P1: re-split scenes from the (re-)synced prose, preserving app-only fields.
     $cid = $row ? (int)$row['id'] : (int)last_id();
     reconcile_scenes($book_id, $cid, $content);
+    reconcile_exercises($book_id, $cid, $content);   // Phase 13: derive exercises from prose
 }
 function import_progressions_md($book_id, $content) {
     // Mirrors codex_sync_lib.parse_progressions(). Supports two layouts (and a mix):
@@ -1500,6 +1502,75 @@ function get_orphan_citations($book_id) {
     ensure_sources();
     return all("SELECT cite_key, COUNT(DISTINCT chapter_file) AS chapters, COALESCE(SUM(hits),0) AS hits
                 FROM claim_sources WHERE book_id=? AND source_id IS NULL GROUP BY cite_key ORDER BY cite_key", [$book_id]);
+}
+
+/* ============================================ SELF-HELP APPARATUS (Phase 13)
+ * Exercises and chapter takeaways are DERIVED from chapter prose (like scenes),
+ * so the folder .md stays canonical. `exercises` is a rebuildable projection of
+ * `## Exercise` / `> [!exercise]` blocks; takeaways are parsed on demand. The
+ * promise/payoff tracker reuses the existing threads table, relabelled per profile. */
+function ensure_exercises() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec("CREATE TABLE IF NOT EXISTS exercises (
+        id $pk, book_id VARCHAR(40) NOT NULL, chapter_id INT NOT NULL, ordinal INT DEFAULT 1,
+        title VARCHAR(255) DEFAULT '', type VARCHAR(40) DEFAULT '', est_time VARCHAR(60) DEFAULT '',
+        operationalizes VARCHAR(160) DEFAULT '', prompt MEDIUMTEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_ex_ch ON exercises (chapter_id)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_ex_book ON exercises (book_id)"); } catch (Exception $e) {}
+}
+
+/** Rebuild one chapter's exercises from its prose. Fully derived (nothing app-only
+ *  to preserve), so it's a straight delete + reinsert. Returns the count. */
+function reconcile_exercises($book_id, $chapter_id, $body) {
+    ensure_exercises();
+    q("DELETE FROM exercises WHERE chapter_id=?", [(int)$chapter_id]);
+    $ex = md_find_exercises($body);
+    foreach ($ex as $e)
+        q("INSERT INTO exercises (book_id,chapter_id,ordinal,title,type,est_time,operationalizes,prompt) VALUES (?,?,?,?,?,?,?,?)",
+          [$book_id, (int)$chapter_id, (int)$e['ordinal'], $e['title'], $e['type'], $e['est_time'], $e['operationalizes'], $e['prompt']]);
+    return count($ex);
+}
+
+/** Rebuild exercises for every live chapter in a book (reindex / lazy backfill). */
+function index_exercises($book_id) {
+    ensure_exercises();
+    $n = 0;
+    foreach (all("SELECT id,body FROM chapters WHERE book_id=? AND status<>'archived' AND LOWER(file) NOT LIKE '%readme.md'", [$book_id]) as $c)
+        $n += reconcile_exercises($book_id, (int)$c['id'], $c['body']);
+    return $n;
+}
+
+/** All exercises in a book, joined to their chapter for display + ordering. */
+function get_exercises($book_id) {
+    ensure_exercises();
+    return all("SELECT x.*, c.num AS chapter_num, c.title AS chapter_title, c.file AS chapter_file, c.sort_order AS chapter_sort
+                FROM exercises x JOIN chapters c ON c.id=x.chapter_id
+                WHERE x.book_id=? AND c.status<>'archived'
+                ORDER BY (c.num+0), c.num, x.ordinal", [$book_id]);
+}
+function get_chapter_exercises($chapter_id) {
+    ensure_exercises();
+    return all("SELECT * FROM exercises WHERE chapter_id=? ORDER BY ordinal", [(int)$chapter_id]);
+}
+function count_exercises($book_id) { ensure_exercises(); return (int) val("SELECT COUNT(*) FROM exercises x JOIN chapters c ON c.id=x.chapter_id WHERE x.book_id=? AND c.status<>'archived'", [$book_id]); }
+
+/** A chapter's takeaways / key points, parsed from its prose on demand. */
+function get_chapter_takeaways($body) { return md_find_takeaways($body); }
+
+/** Workbook data: per live chapter, its takeaways + exercises. Powers the
+ *  self-help Exercises/Workbook view and an eventual workbook export. */
+function get_workbook($book_id) {
+    ensure_exercises();
+    $out = [];
+    foreach (all("SELECT id,num,title,file,body FROM chapters WHERE book_id=? AND status<>'archived' AND LOWER(file) NOT LIKE '%readme.md' ORDER BY (num+0), num, file", [$book_id]) as $c) {
+        $takeaways = md_find_takeaways($c['body']);
+        $exercises = get_chapter_exercises((int)$c['id']);
+        if (!$takeaways && !$exercises) continue;
+        $out[] = ['chapter' => ['id'=>$c['id'],'num'=>$c['num'],'title'=>$c['title'],'file'=>$c['file']],
+                  'takeaways' => $takeaways, 'exercises' => $exercises];
+    }
+    return $out;
 }
 
 /** A human-readable reference string (a light, house-style citation). */

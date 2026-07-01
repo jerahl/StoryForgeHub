@@ -262,4 +262,21 @@ CREATE TABLE IF NOT EXISTS claim_sources (
   KEY k_claim_src (source_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- exercises (Phase 13) — self-help practices DERIVED from chapter prose
+-- (## Exercise / > [!exercise] blocks). Rebuildable projection; prose is canonical.
+CREATE TABLE IF NOT EXISTS exercises (
+  id              INT AUTO_INCREMENT PRIMARY KEY,
+  book_id         VARCHAR(40)  NOT NULL,
+  chapter_id      INT          NOT NULL,
+  ordinal         INT          DEFAULT 1,
+  title           VARCHAR(255) DEFAULT '',
+  type            VARCHAR(40)  DEFAULT '',            -- reflection|worksheet|practice|assessment
+  est_time        VARCHAR(60)  DEFAULT '',
+  operationalizes VARCHAR(160) DEFAULT '',            -- slug of the concept it operationalizes
+  prompt          MEDIUMTEXT,
+  updated_at      DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY k_ex_ch (chapter_id),
+  KEY k_ex_book (book_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;
