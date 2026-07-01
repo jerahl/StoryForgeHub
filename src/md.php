@@ -19,8 +19,29 @@ const SCENE_LABELS = ['Draft 1','Needs revision','Final','Alt version','Note'];
 const SCENE_LABELS_EXCLUDED = ['Alt version','Note'];
 function scene_label_excluded($label) { return in_array((string)$label, SCENE_LABELS_EXCLUDED, true); }
 
+/** Resolve database meta for any db_key. Prefers the profile-aware resolver
+ *  (profiles.php, Phase 10/11) when loaded so non-fiction keys resolve; falls
+ *  back to the fiction DBMETA const, then a generic default, so md.php stays
+ *  usable standalone and never warns on an unknown key. */
+function md_dbmeta($db) {
+    if (function_exists('dbmeta')) return dbmeta($db);
+    if (isset(DBMETA[$db])) return DBMETA[$db];
+    $t = ucfirst((string)$db);
+    return ['title'=>$t, 'singular'=>rtrim($t, 's') ?: $t, 'detailLabel'=>'Detail'];
+}
+
 function md_find_links($s) {
     preg_match_all('/\[\[([^\]]+)\]\]/', $s, $m);
+    return $m[1];
+}
+
+/** Citation tokens (Phase 12): `[^cite:key]` footnote-style markers embedded in
+ *  prose. They are ordinary Markdown, so they round-trip untouched through the
+ *  parser and the folder sync — the prose file stays the source of truth. Returns
+ *  the cite_keys referenced, in document order (duplicates preserved so callers
+ *  can count hits per chapter). */
+function md_find_cite_tokens($s) {
+    preg_match_all('/\[\^cite:([A-Za-z0-9._-]+)\]/', (string)$s, $m);
     return $m[1];
 }
 
@@ -59,7 +80,7 @@ function md_parse_entry($raw, $db, $fallback_slug = '') {
     }
     if (!$slug) $slug = $fallback_slug;
 
-    $detail_label = DBMETA[$db]['detailLabel'];
+    $detail_label = md_dbmeta($db)['detailLabel'];
     $detail = ''; $first_app = '';
     foreach ($fields as $f) {
         if (strtolower($f['label']) === strtolower($detail_label)) $detail = $f['value'];
@@ -91,7 +112,7 @@ function md_parse_entry($raw, $db, $fallback_slug = '') {
 
     return [
         'slug'=>$slug, 'name'=>$name, 'db'=>$db,
-        'status'=>$status ?: 'seed', 'type'=>$type ?: DBMETA[$db]['singular'],
+        'status'=>$status ?: 'seed', 'type'=>$type ?: md_dbmeta($db)['singular'],
         'detail'=>$detail, 'detailLabel'=>$detail_label, 'firstApp'=>$first_app,
         'fields'=>$fields, 'related'=>$related, 'relatedRaw'=>$related_raw,
         'sections'=>$sec_out, 'threads'=>$threads, 'sources'=>$sources,
@@ -103,7 +124,7 @@ function md_render_entry($e) {
     $out = ['# ' . $e['name'], ''];
     $out[] = '- **Slug:** ' . $e['slug'];
     $out[] = '- **Status:** ' . ($e['status'] ?? 'seed');
-    $out[] = '- **Type:** ' . ($e['type'] ?? DBMETA[$e['db']]['singular']);
+    $out[] = '- **Type:** ' . ($e['type'] ?? md_dbmeta($e['db'])['singular']);
     foreach (($e['fields'] ?? []) as $f) $out[] = '- **' . $f['label'] . ':** ' . $f['value'];
 
     $related = $e['related'] ?? [];
@@ -145,6 +166,77 @@ function md_extract_comments($text) {
         return '';
     }, (string)$text);
     return [$prose, $comments];
+}
+
+/** Parse self-help exercises out of a chapter body (Phase 13). Two forms, both
+ *  ordinary Markdown so they round-trip through the parser untouched:
+ *    ## Exercise[: Title]           (a heading whose text starts with "Exercise")
+ *        - **Type:** reflection     (optional metadata bullets)
+ *        - **Time:** 10 min
+ *        - **Operationalizes:** [[concept-slug]]
+ *        prompt text…
+ *    > [!exercise] Title            (callout block; the following > lines are the prompt)
+ *  Returns [ ['ordinal','title','type','est_time','operationalizes','prompt'], … ]. */
+function md_find_exercises($body) {
+    $body = str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], (string)$body);
+    $lines = explode("\n", $body);
+    $n = count($lines); $i = 0; $found = [];
+    while ($i < $n) {
+        $t = trim($lines[$i]);
+        if (preg_match('/^#{2,3}\s+exercise\b[:\s\x{2014}\x{2013}-]*(.*)$/iu', $t, $m)) {
+            $title = trim($m[1]); $i++; $bl = [];
+            // collect until the next heading OR the next exercise callout (which
+            // starts its own exercise), so consecutive exercises don't merge.
+            while ($i < $n && !preg_match('/^#{1,3}\s+/u', trim($lines[$i]))
+                           && !preg_match('/^>\s*\[!exercise\]/i', trim($lines[$i]))) { $bl[] = $lines[$i]; $i++; }
+            $found[] = md_parse_exercise_block($title, implode("\n", $bl));
+            continue;
+        }
+        if (preg_match('/^>\s*\[!exercise\]\s*(.*)$/i', $t, $m)) {
+            $title = trim($m[1]); $i++; $bl = [];
+            while ($i < $n && preg_match('/^>\s?(.*)$/', $lines[$i], $mm)) { $bl[] = $mm[1]; $i++; }
+            $found[] = md_parse_exercise_block($title, implode("\n", $bl));
+            continue;
+        }
+        $i++;
+    }
+    $out = []; $k = 1;
+    foreach ($found as $ex) { $ex['ordinal'] = $k++; $out[] = $ex; }
+    return $out;
+}
+function md_parse_exercise_block($title, $body) {
+    $type = ''; $time = ''; $oper = ''; $prompt = [];
+    foreach (explode("\n", (string)$body) as $l) {
+        $ls = trim($l);
+        if (preg_match('/^-\s*\*\*([^:*]+):\*\*\s*(.*)$/', $ls, $m)) {
+            $key = strtolower(trim($m[1])); $val = trim($m[2]);
+            if ($key === 'type') { $type = strtolower($val); continue; }
+            if (in_array($key, ['time','est. time','est time','duration'], true)) { $time = $val; continue; }
+            if (in_array($key, ['operationalizes','concept','operationalises'], true)) { $lk = md_find_links($val); $oper = $lk[0] ?? trim($val); continue; }
+        }
+        $prompt[] = $l;
+    }
+    return ['title' => ($title !== '' ? $title : 'Exercise'), 'type' => $type,
+            'est_time' => $time, 'operationalizes' => $oper, 'prompt' => trim(implode("\n", $prompt), "\n")];
+}
+
+/** Pull a chapter's takeaways / key points as a bullet list (Phase 13). Returns
+ *  the bullet strings under the first "## Takeaways" / "## Key points" heading. */
+function md_find_takeaways($body) {
+    $body = str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], (string)$body);
+    $lines = explode("\n", $body); $n = count($lines); $i = 0; $items = [];
+    while ($i < $n) {
+        if (preg_match('/^#{2,3}\s+(key\s+takeaways|key\s+takeaway|key\s+points|takeaways|key\s+ideas)\s*$/iu', trim($lines[$i]))) {
+            $i++;
+            while ($i < $n && !preg_match('/^#{1,3}\s+/u', trim($lines[$i]))) {
+                if (preg_match('/^\s*[-*]\s+(.*)$/', $lines[$i], $m)) { $x = trim($m[1]); if ($x !== '') $items[] = $x; }
+                $i++;
+            }
+            break;
+        }
+        $i++;
+    }
+    return $items;
 }
 
 /** Split a chapter body into scenes on thematic breaks (--- / *** / ___).

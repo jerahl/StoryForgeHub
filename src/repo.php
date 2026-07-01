@@ -2,19 +2,41 @@
 /** repo.php — data access + sync logic (import / push / pull / apply). */
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/md.php';
+require_once __DIR__ . '/profiles.php';   // book profiles (Phase 10): db sets, templates, band labels
 
 /* ----------------------------------------------------------------- books */
+/** Lazy-migration for the Phase 10 book profile. Additive column; existing books
+ *  default to 'fiction' so they behave byte-for-byte as before. */
+function ensure_book_profile() {
+    static $done = false; if ($done) return; $done = true;
+    try { db()->exec("ALTER TABLE books ADD COLUMN profile VARCHAR(20) DEFAULT 'fiction'"); } catch (Exception $e) {}
+    try { db()->exec("UPDATE books SET profile='fiction' WHERE profile IS NULL OR profile=''"); } catch (Exception $e) {}
+}
 function get_books() {
+    ensure_book_profile();
     $rows = all("SELECT * FROM books ORDER BY sort_order, title");
     foreach ($rows as &$b) $b = decorate_book($b);
     return $rows;
 }
 function get_book($id) {
+    ensure_book_profile();
     $b = one("SELECT * FROM books WHERE id=?", [$id]);
     return $b ? decorate_book($b) : null;
 }
+/** Raw profile id for a book (default 'fiction'). Cheap; used where only the
+ *  profile is needed (e.g. the POST handlers that work from a book id string). */
+function book_profile($book_id) {
+    ensure_book_profile();
+    return normalize_profile(val("SELECT profile FROM books WHERE id=?", [$book_id]) ?: 'fiction');
+}
+/** Set a book's profile (validated to a known profile id). */
+function set_book_profile($book_id, $profile) {
+    ensure_book_profile();
+    q("UPDATE books SET profile=? WHERE id=?", [normalize_profile($profile), $book_id]);
+}
 function decorate_book($b) {
     $id = $b['id'];
+    $b['profile'] = normalize_profile($b['profile'] ?? 'fiction');
     $b['entryCount']   = (int) val("SELECT COUNT(*) FROM entries WHERE book_id=?", [$id]);
     $b['chapterCount'] = (int) val("SELECT COUNT(*) FROM chapters WHERE book_id=? AND status<>'archived'", [$id]);
     $b['wordCount']    = (int) val("SELECT COALESCE(SUM(word_count),0) FROM chapters WHERE book_id=? AND status<>'archived'", [$id]);
@@ -24,6 +46,7 @@ function decorate_book($b) {
     return $b;
 }
 function save_book($d) {
+    ensure_book_profile();
     $exists = one("SELECT id FROM books WHERE id=?", [$d['id']]);
     if ($exists) {
         q("UPDATE books SET folder=?,title=?,series=?,num=?,status=?,logline=?,genre=?,word_target=?,dot=?,sort_order=?
@@ -31,11 +54,15 @@ function save_book($d) {
           [$d['folder'],$d['title'],$d['series']??'',$d['num']??'',$d['status']??'planning',
            $d['logline']??'',$d['genre']??'',$d['word_target']??'',$d['dot']??'#4A4391',$d['sort_order']??0,$d['id']]);
     } else {
-        q("INSERT INTO books (id,folder,title,series,num,status,logline,genre,word_target,dot,sort_order)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        q("INSERT INTO books (id,folder,title,series,num,status,logline,genre,word_target,dot,sort_order,profile)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
           [$d['id'],$d['folder'],$d['title'],$d['series']??'',$d['num']??'',$d['status']??'planning',
-           $d['logline']??'',$d['genre']??'',$d['word_target']??'',$d['dot']??'#4A4391',$d['sort_order']??0]);
+           $d['logline']??'',$d['genre']??'',$d['word_target']??'',$d['dot']??'#4A4391',$d['sort_order']??0,
+           normalize_profile($d['profile'] ?? 'fiction')]);
     }
+    // Profile is only written when explicitly supplied, so a folder sync (which
+    // never sends a profile) can't reset an author's choice back to fiction.
+    if (isset($d['profile'])) set_book_profile($d['id'], $d['profile']);
 }
 function book_id_for_folder($folder) {
     return val("SELECT id FROM books WHERE folder=?", [$folder]);
@@ -79,7 +106,8 @@ function entry_to_struct($row) {
     ];
 }
 function save_entry($book_id, $db, $e) {
-    $detail_label = DBMETA[$db]['detailLabel'];
+    $meta = dbmeta($db);
+    $detail_label = $meta['detailLabel'];
     $detail = ''; $first_app = '';
     foreach (($e['fields'] ?? []) as $f) {
         if (strtolower($f['label']) === strtolower($detail_label)) $detail = $f['value'];
@@ -91,12 +119,12 @@ function save_entry($book_id, $db, $e) {
         if ($row) {
             $eid = $row['id'];
             q("UPDATE entries SET name=?,status=?,type=?,detail=?,detail_label=?,first_app=?,related_raw=? WHERE id=?",
-              [$e['name'], $e['status'] ?? 'seed', $e['type'] ?? DBMETA[$db]['singular'],
+              [$e['name'], $e['status'] ?? 'seed', $e['type'] ?? $meta['singular'],
                $detail, $detail_label, $first_app, $e['relatedRaw'] ?? null, $eid]);
         } else {
             q("INSERT INTO entries (book_id,db_key,slug,name,status,type,detail,detail_label,first_app,related_raw)
                VALUES (?,?,?,?,?,?,?,?,?,?)",
-              [$book_id, $db, $e['slug'], $e['name'], $e['status'] ?? 'seed', $e['type'] ?? DBMETA[$db]['singular'],
+              [$book_id, $db, $e['slug'], $e['name'], $e['status'] ?? 'seed', $e['type'] ?? $meta['singular'],
                $detail, $detail_label, $first_app, $e['relatedRaw'] ?? null]);
             $eid = last_id();
         }
@@ -202,6 +230,8 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     $wc = md_word_count($new_md);
     q("UPDATE chapters SET body=?, word_count=?, words=? WHERE id=?", [$new_md, $wc, number_format($wc), (int)$chapter_id]);
     reconcile_scenes($book_id, (int)$chapter_id, $new_md);
+    reconcile_exercises($book_id, (int)$chapter_id, $new_md);   // Phase 13
+    reconcile_citations($book_id);   // Phase 12: prose edit may add/remove [^cite:key] tokens
     return ['status'=>'ok', 'msg'=>'Saved to the manuscript file and database.'];
 }
 
@@ -747,17 +777,21 @@ function import_snapshot($snap) {
         foreach ($bk['meta'] as $mp) save_meta_page($bid, $mp['slug'], $mp['title'], $mp['body']);
         // notes (Codex/Notes) — present only if the snapshot includes them
         foreach (($bk['notes'] ?? []) as $np) save_note_page($bid, $np['slug'], $np['title'] ?? ucfirst(str_replace('-',' ',$np['slug'])), $np['body'] ?? '');
+        // sources (Phase 12) — present only if the snapshot includes them
+        foreach (($bk['sources'] ?? []) as $sr) save_source($bid, $sr);
         rebuild_threads($bid);
+        reconcile_citations($bid);   // Phase 12: rebuild claim links from prose cite tokens
     }
 }
 
 /* ===================================================== SYNC: push files */
 /** payload: { books: [ {folder, files:{relpath: content}} ] }  (folder -> web) */
 function push_files($payload) {
-    $report = ['entries'=>0,'chapters'=>0,'meta'=>0,'notes'=>0,'progressions'=>0,'archived'=>0,'skipped'=>0,'created'=>[],'books'=>[]];
-    $folder_re = '#^Codex/(' . implode('|', array_map(function($k){return DBMETA[$k]['folder'];}, DB_KEYS)) . ')/(.+)\.md$#';
-    $db_by_folder = [];
-    foreach (DB_KEYS as $k) $db_by_folder[DBMETA[$k]['folder']] = $k;
+    $report = ['entries'=>0,'chapters'=>0,'meta'=>0,'notes'=>0,'progressions'=>0,'sources'=>0,'archived'=>0,'skipped'=>0,'created'=>[],'books'=>[]];
+    // Recognize every profile's Codex folders (Phase 11), not just fiction's, so a
+    // non-fiction book's Codex/Concepts/*.md round-trips through the same parser.
+    $db_by_folder = folder_db_map();
+    $folder_re = '#^Codex/(' . implode('|', array_map(function($f){return preg_quote($f, '#');}, array_keys($db_by_folder))) . ')/(.+)\.md$#';
 
     migrate(); // ensure tables exist (lets a fresh DB accept the first push)
 
@@ -779,7 +813,13 @@ function push_files($payload) {
         foreach (($bk['files'] ?? []) as $rel => $content) {
             $rel = str_replace('\\', '/', $rel);
             $base = strtolower(basename($rel));
-            if (preg_match($folder_re, $rel, $m)) {
+            if (preg_match('#^Codex/Sources/(.+)\.md$#', $rel, $m)) {
+                // Sources are a dedicated table (Phase 12), parsed straight from
+                // Codex/Sources/*.md — never generic entries.
+                if ($base === 'index.md' || strpos($base,'template')!==false || $base[0]==='_') { continue; }
+                import_source_md($bid, $m[1], $content);
+                $report['sources']++; $touched++;
+            } elseif (preg_match($folder_re, $rel, $m)) {
                 $folder = $m[1]; $slug = $m[2];
                 if ($base === 'index.md' || strpos($base,'template')!==false || $base[0]==='_') { continue; }
                 $db = $db_by_folder[$folder];
@@ -832,6 +872,7 @@ function push_files($payload) {
             }
         }
         rebuild_threads($bid);
+        reconcile_citations($bid);   // Phase 12: rebuild claim links from prose cite tokens
         $report['books'][$bk['folder']] = $touched;
     }
     return $report;
@@ -859,6 +900,7 @@ function upsert_chapter_from_md($book_id, $file, $content) {
     // P1: re-split scenes from the (re-)synced prose, preserving app-only fields.
     $cid = $row ? (int)$row['id'] : (int)last_id();
     reconcile_scenes($book_id, $cid, $content);
+    reconcile_exercises($book_id, $cid, $content);   // Phase 13: derive exercises from prose
 }
 function import_progressions_md($book_id, $content) {
     // Mirrors codex_sync_lib.parse_progressions(). Supports two layouts (and a mix):
@@ -1212,9 +1254,160 @@ function diag_dialogue($text, $ctx = []) {
     return ['quotes'=>$quotes, 'bookisms'=>$bk, 'tagged'=>$tagged, 'tags_per_speaker'=>$tps, 'adverb_examples'=>array_keys($advEx)];
 }
 
+/* ---- Non-fiction analyzers (Phase 14): a different battery on the P7 machinery.
+ * Findings stay "patterns to review," never auto-applied. */
+
+/** Rough syllable estimate (vowel groups, drop trailing silent e). */
+function diag_syllables($word) {
+    $w = preg_replace('/[^a-z]/', '', strtolower((string)$word));
+    if ($w === '') return 0;
+    $w = preg_replace('/e$/', '', $w);
+    preg_match_all('/[aeiouy]+/', $w, $m);
+    return max(1, count($m[0]));
+}
+
+/** Readability: Flesch-Kincaid grade + reading ease + sentence-length spread. */
+function diag_readability($text) {
+    $sentences = diag_sentences($text);
+    $words = diag_words($text);
+    $ns = count($sentences); $nw = count($words);
+    if ($ns === 0 || $nw === 0) return ['grade'=>null,'ease'=>null,'wps'=>0,'words'=>$nw,'sentences'=>$ns,'long_sentences'=>0];
+    $syl = 0; foreach ($words as $w) $syl += diag_syllables($w);
+    $wps = $nw / $ns; $spw = $syl / $nw;
+    $grade = 0.39 * $wps + 11.8 * $spw - 15.59;
+    $ease  = 206.835 - 1.015 * $wps - 84.6 * $spw;
+    $long = 0; foreach ($sentences as $s) if (count(diag_words($s)) > 30) $long++;
+    return ['grade'=>round($grade,1), 'ease'=>round($ease,1), 'wps'=>round($wps,1), 'spw'=>round($spw,2),
+            'words'=>$nw, 'sentences'=>$ns, 'long_sentences'=>$long];
+}
+
+/** Citation coverage: claim-like sentences (statistics / evidence language) that
+ *  carry no [^cite:…] token in the same sentence — "claims to source." */
+function diag_citation_coverage($md) {
+    $text = diag_plain_text($md);   // leaves [^cite:key] tokens intact
+    $sentences = diag_sentences($text);
+    $claimRe = '/(\d[\d,.]*\s*(?:%|percent|million|billion|trillion|thousand|people|users|patients|cases|times|percentage)'
+             . '|\b(?:studies|study|research|researchers|data|survey|surveys|evidence|scientists?|experts?|statistics?|according to|shows? that|found that|proven|proves)\b)/i';
+    $unsupported = []; $supported = 0; $total = 0;
+    foreach ($sentences as $s) {
+        if (!preg_match($claimRe, $s)) continue;
+        $total++;
+        if (strpos($s, '[^cite:') !== false) { $supported++; continue; }
+        if (count($unsupported) < 8) $unsupported[] = trim(preg_replace('/\s+/', ' ', $s));
+    }
+    return ['claims'=>$total, 'supported'=>$supported, 'unsupported'=>$total - $supported, 'examples'=>$unsupported];
+}
+
+/** Cross-chapter repetition: contentful 5/6-word windows appearing in >=2 live
+ *  chapters (a point restated across the book). Book-level. */
+function diag_cross_repetition($book_id) {
+    $stop = diag_stopwords();
+    $gramChapters = [];   // gram => [chapterLabel => true]
+    $chs = all("SELECT num,title,file,body FROM chapters WHERE book_id=? AND status<>'archived' AND LOWER(file) NOT LIKE '%readme.md' ORDER BY (num+0), num, file", [$book_id]);
+    foreach ($chs as $c) {
+        $label = 'Ch ' . ($c['num'] !== '' ? $c['num'] : $c['file']);
+        $ws = diag_words(diag_plain_text($c['body'])); $n = count($ws);
+        $size = 6; $seen = [];
+        for ($i = 0; $i + $size <= $n; $i++) {
+            $gram = array_slice($ws, $i, $size);
+            if (isset($stop[$gram[0]]) || isset($stop[$gram[$size-1]])) continue;   // don't start/end on a stopword
+            $content = 0; foreach ($gram as $g) if (!isset($stop[$g])) $content++;
+            if ($content < 3) continue;                                             // must carry real content
+            $key = implode(' ', $gram);
+            if (isset($seen[$key])) continue; $seen[$key] = true;                   // once per chapter
+            $gramChapters[$key][$label] = true;
+        }
+    }
+    $out = [];
+    foreach ($gramChapters as $gram => $chapters) {
+        if (count($chapters) < 2) continue;
+        $out[] = ['phrase'=>$gram, 'chapters'=>array_keys($chapters), 'count'=>count($chapters)];
+    }
+    usort($out, function($a, $b) { return $a['count'] !== $b['count'] ? $b['count'] - $a['count'] : strlen($b['phrase']) - strlen($a['phrase']); });
+    // Collapse sliding-window duplicates: 6-grams from one repeated sentence share
+    // contiguous 4-word runs — keep the first, drop any that overlaps a kept one.
+    $runsOf = function($phrase) {
+        $w = explode(' ', $phrase); $r = [];
+        for ($i = 0; $i + 4 <= count($w); $i++) $r[] = implode(' ', array_slice($w, $i, 4));
+        return $r;
+    };
+    $kept = []; $covered = [];
+    foreach ($out as $r) {
+        $runs = $runsOf($r['phrase']); $overlap = false;
+        foreach ($runs as $run) if (isset($covered[$run])) { $overlap = true; break; }
+        if ($overlap) continue;
+        foreach ($runs as $run) $covered[$run] = true;
+        $kept[] = $r;
+    }
+    return array_slice($kept, 0, 20);
+}
+
+/** Jargon / undefined terms: Concept entries referenced in the book that carry no
+ *  definition yet. Leans on the P11 concept template + P5 mention index. */
+function diag_undefined_terms($book_id) {
+    $out = [];
+    foreach (all("SELECT id,slug,name,status FROM entries WHERE book_id=? AND db_key='concepts' ORDER BY name", [$book_id]) as $e) {
+        $hasDef = (int) val("SELECT COUNT(*) FROM entry_fields WHERE entry_id=? AND LOWER(label)='definition' AND TRIM(COALESCE(value,''))<>''", [$e['id']]);
+        if (!$hasDef) $hasDef = (int) val("SELECT COUNT(*) FROM entry_sections WHERE entry_id=? AND TRIM(COALESCE(body,''))<>''", [$e['id']]);
+        if ($hasDef) continue;
+        $apps = get_appearances($book_id, $e['slug']);
+        $chapterMentions = 0; foreach ($apps as $a) if ($a['src_type'] === 'chapter') $chapterMentions += (int)$a['total'];
+        if ($chapterMentions > 0)
+            $out[] = ['slug'=>$e['slug'], 'name'=>$e['name'], 'mentions'=>$chapterMentions, 'status'=>$e['status']];
+    }
+    usort($out, function($a, $b) { return $b['mentions'] - $a['mentions']; });
+    return $out;
+}
+
+/** Promise/payoff coverage: open reader-promises (threads) with no payoff yet. */
+function nonfiction_promise_coverage($book_id) {
+    return get_threads($book_id, 'open');
+}
+
+/** Book-level non-fiction diagnostics assembly (profile selects which run). */
+function get_nonfiction_diagnostics($book_id) {
+    $diag = diagnostics_for(book_profile($book_id));
+    // undefined-term detection reads the P5 mention index; refresh it so the
+    // diagnostic is accurate on view (books are small; bounded work).
+    if (!empty($diag['jargon']) && function_exists('index_mentions')) index_mentions($book_id);
+    $chapters = [];
+    foreach (get_chapters($book_id) as $ch) {
+        if (preg_match('/readme\.md$/i', (string)$ch['file'])) continue;
+        $d = get_chapter_diagnostics($book_id, $ch['id']); if (!$d) continue;
+        $data = $d['data'];
+        $chapters[] = [
+            'chapter'     => $ch,
+            'words'       => $data['words'] ?? 0,
+            'readability' => $data['readability'] ?? null,
+            'citations'   => $data['citations'] ?? null,
+            'patterns'    => count($data['patterns'] ?? []),
+        ];
+    }
+    return [
+        'diag'       => $diag,
+        'chapters'   => $chapters,
+        'repetition' => !empty($diag['repetition']) ? diag_cross_repetition($book_id) : [],
+        'undefined'  => !empty($diag['jargon']) ? diag_undefined_terms($book_id) : [],
+        'orphans'    => !empty($diag['citations']) ? get_orphan_citations($book_id) : [],
+        'promises'   => !empty($diag['promises']) ? nonfiction_promise_coverage($book_id) : [],
+    ];
+}
+
 function analyze_prose($md, $ctx = []) {
     $text = diag_plain_text($md);
-    return ['words'=>count(diag_words($text)), 'usage'=>diag_usage_frequency($text), 'patterns'=>diag_patterns($text, $ctx), 'dialogue'=>diag_dialogue($text, $ctx)];
+    $diag = $ctx['diag'] ?? ['usage'=>true,'patterns'=>true,'dialogue'=>true,'readability'=>false,'citations'=>false];
+    $out = [
+        'words'    => count(diag_words($text)),
+        'usage'    => diag_usage_frequency($text),
+        'patterns' => diag_patterns($text, $ctx),
+        // dialogue is disabled for non-fiction; keep the key present (empty) so the
+        // chapter Smart-editing panel's shape stays stable.
+        'dialogue' => !empty($diag['dialogue']) ? diag_dialogue($text, $ctx)
+                        : ['quotes'=>0,'bookisms'=>[],'tagged'=>0,'tags_per_speaker'=>[],'adverb_examples'=>[]],
+    ];
+    if (!empty($diag['readability'])) $out['readability'] = diag_readability($text);
+    if (!empty($diag['citations']))   $out['citations']   = diag_citation_coverage($md);
+    return $out;
 }
 
 /** Book-wide em-dash baseline (per 1k words), a cheap scan cached per request. */
@@ -1255,13 +1448,15 @@ function get_chapter_diagnostics($book_id, $chapter_id) {
     ensure_prose_analysis();
     $c = one("SELECT id,book_id,num,title,file,body FROM chapters WHERE id=? AND book_id=?", [$chapter_id, $book_id]);
     if (!$c) return null;
-    $hash = md5('v2|'.(string)$c['body']);   // bump tag when analyzer output shape changes (forces recompute)
+    $profile = book_profile($book_id);
+    $diag = diagnostics_for($profile);
+    $hash = md5('v3|'.$profile.'|'.(string)$c['body']);   // include profile: bumps when the battery changes
     $row = one("SELECT body_hash,data FROM prose_analysis WHERE chapter_id=?", [$chapter_id]);
     if ($row && $row['body_hash'] === $hash) {
         $data = json_decode($row['data'], true);
         if (is_array($data)) return ['chapter'=>$c, 'data'=>$data, 'cached'=>true];
     }
-    $ctx = ['em_baseline'=>book_em_baseline($book_id), 'speakers'=>book_speakers($book_id)];
+    $ctx = ['em_baseline'=>book_em_baseline($book_id), 'speakers'=>book_speakers($book_id), 'profile'=>$profile, 'diag'=>$diag];
     $data = analyze_prose($c['body'], $ctx);
     q("DELETE FROM prose_analysis WHERE chapter_id=?", [$chapter_id]);
     q("INSERT INTO prose_analysis (book_id,chapter_id,body_hash,data) VALUES (?,?,?,?)", [$book_id, $chapter_id, $hash, json_encode($data)]);
@@ -1289,3 +1484,260 @@ function get_book_diagnostics($book_id) {
 /** Warm/refresh the diagnostics cache for a book (used by the reindex CLI/timer). */
 function reindex_prose($book_id) { ensure_prose_analysis(); $n = 0; foreach (get_chapters($book_id) as $ch) { if (preg_match('/readme\.md$/i', (string)$ch['file'])) continue; get_chapter_diagnostics($book_id, $ch['id']); $n++; } return $n; }
 function reindex_prose_all() { foreach (get_books() as $b) reindex_prose($b['id']); }
+
+/* ============================================ SOURCES & CITATIONS (Phase 12)
+ * The credibility backbone for non-fiction. Two tables, lazily migrated:
+ *   sources        — citation metadata, one row per work, keyed by a stable cite_key.
+ *   claim_sources  — a REBUILDABLE cache linking a chapter (by chapter_file, the same
+ *                    stable key chapter_notes uses) to the sources it cites, derived
+ *                    by scanning prose for `[^cite:key]` tokens. Prose stays canonical;
+ *                    losing this table costs nothing — reconcile_citations() rebuilds it.
+ * Sources are authored in Codex/Sources/<cite_key>.md (folder = source of truth) and
+ * parsed into the table on push; citation tokens round-trip untouched. */
+function source_types() { return ['book','article','study','interview','web']; }
+
+function ensure_sources() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    foreach ([
+        "CREATE TABLE IF NOT EXISTS sources (
+            id $pk, book_id VARCHAR(40) NOT NULL, cite_key VARCHAR(160) NOT NULL,
+            type VARCHAR(20) DEFAULT 'web', author VARCHAR(255) DEFAULT '', title VARCHAR(500) DEFAULT '',
+            year VARCHAR(20) DEFAULT '', publisher VARCHAR(255) DEFAULT '', url TEXT,
+            accessed VARCHAR(40) DEFAULT '', locator VARCHAR(160) DEFAULT '', note TEXT,
+            sort_order INT DEFAULT 0, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP )",
+        "CREATE TABLE IF NOT EXISTS claim_sources (
+            id $pk, book_id VARCHAR(40) NOT NULL, chapter_file VARCHAR(255) NOT NULL,
+            source_id INT DEFAULT NULL, cite_key VARCHAR(160) NOT NULL, hits INT DEFAULT 1,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP )",
+    ] as $s) { try { db()->exec($s); } catch (Exception $e) {} }
+    try { db()->exec("CREATE UNIQUE INDEX uniq_source ON sources (book_id, cite_key)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_claim_book_file ON claim_sources (book_id, chapter_file)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_claim_src ON claim_sources (source_id)"); } catch (Exception $e) {}
+}
+
+function get_sources($book_id) { ensure_sources(); return all("SELECT * FROM sources WHERE book_id=? ORDER BY sort_order, LOWER(author), LOWER(title), cite_key", [$book_id]); }
+function get_source($book_id, $id) { ensure_sources(); return one("SELECT * FROM sources WHERE book_id=? AND id=?", [$book_id, (int)$id]); }
+function get_source_by_key($book_id, $key) { ensure_sources(); return one("SELECT * FROM sources WHERE book_id=? AND cite_key=?", [$book_id, (string)$key]); }
+
+/** Insert/update a source, keyed by cite_key within the book. Returns the id. */
+function save_source($book_id, $d) {
+    ensure_sources();
+    $key = trim((string)($d['cite_key'] ?? ''));
+    if ($key === '') {
+        // derive a stable key: author-year, else a slug of the title
+        $base = trim((string)($d['author'] ?? '')) ?: trim((string)($d['title'] ?? '')) ?: 'source';
+        $key = strtolower(preg_replace('/[^a-z0-9]+/i', '-', $base));
+        $yr = preg_replace('/[^0-9]/', '', (string)($d['year'] ?? ''));
+        if ($yr !== '') $key .= '-' . $yr;
+        $key = trim(preg_replace('/-+/', '-', $key), '-') ?: 'source';
+    }
+    $type = in_array($d['type'] ?? '', source_types(), true) ? $d['type'] : 'web';
+    $cols = [
+        'type'=>$type, 'author'=>(string)($d['author'] ?? ''), 'title'=>(string)($d['title'] ?? ''),
+        'year'=>(string)($d['year'] ?? ''), 'publisher'=>(string)($d['publisher'] ?? ''),
+        'url'=>(string)($d['url'] ?? ''), 'accessed'=>(string)($d['accessed'] ?? ''),
+        'locator'=>(string)($d['locator'] ?? ''), 'note'=>(string)($d['note'] ?? ''),
+    ];
+    $existing = one("SELECT id FROM sources WHERE book_id=? AND cite_key=?", [$book_id, $key]);
+    if (!$existing && !empty($d['id'])) $existing = one("SELECT id FROM sources WHERE book_id=? AND id=?", [$book_id, (int)$d['id']]);
+    if ($existing) {
+        q("UPDATE sources SET cite_key=?,type=?,author=?,title=?,year=?,publisher=?,url=?,accessed=?,locator=?,note=? WHERE id=?",
+          [$key,$cols['type'],$cols['author'],$cols['title'],$cols['year'],$cols['publisher'],$cols['url'],$cols['accessed'],$cols['locator'],$cols['note'],$existing['id']]);
+        $id = (int)$existing['id'];
+    } else {
+        $n = (int) val("SELECT COALESCE(MAX(sort_order),-1)+1 FROM sources WHERE book_id=?", [$book_id]);
+        q("INSERT INTO sources (book_id,cite_key,type,author,title,year,publisher,url,accessed,locator,note,sort_order)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+          [$book_id,$key,$cols['type'],$cols['author'],$cols['title'],$cols['year'],$cols['publisher'],$cols['url'],$cols['accessed'],$cols['locator'],$cols['note'],$n]);
+        $id = (int) last_id();
+    }
+    return $id;
+}
+
+function delete_source($book_id, $id) {
+    ensure_sources();
+    q("DELETE FROM sources WHERE book_id=? AND id=?", [$book_id, (int)$id]);
+    q("UPDATE claim_sources SET source_id=NULL WHERE book_id=? AND source_id=?", [$book_id, (int)$id]);
+}
+
+/** Parse a Codex/Sources/<slug>.md into the sources table. Reuses the entry
+ *  parser for the metadata list, then maps the labelled fields onto columns.
+ *  cite_key = slug, so `[^cite:<slug>]` tokens resolve against it. */
+function import_source_md($book_id, $file, $content) {
+    ensure_sources();
+    $slug = preg_replace('/\.md$/i', '', basename(str_replace('\\', '/', $file)));
+    $e = md_parse_entry($content, 'sources', $slug);
+    $f = [];
+    foreach (($e['fields'] ?? []) as $row) $f[strtolower(trim($row['label']))] = $row['value'];
+    $pick = function($keys) use ($f) { foreach ($keys as $k) if (isset($f[$k]) && $f[$k] !== '') return $f[$k]; return ''; };
+    $note = '';
+    foreach (($e['sections'] ?? []) as $sec) { if (trim((string)$sec['body']) !== '') { $note = trim((string)$sec['body']); break; } }
+    $type = strtolower(trim((string)($e['type'] ?? '')));
+    if (!in_array($type, source_types(), true)) $type = strtolower($pick(['type']));
+    return save_source($book_id, [
+        'cite_key'  => $e['slug'] ?: $slug,
+        'type'      => $type,
+        'author'    => $pick(['author','authors']),
+        'title'     => $pick(['title']) ?: ($e['name'] ?? ''),
+        'year'      => $pick(['year','date']),
+        'publisher' => $pick(['publisher','journal','publication']),
+        'url'       => $pick(['url','doi','link']),
+        'accessed'  => $pick(['accessed','accessed date','retrieved']),
+        'locator'   => $pick(['locator','page','pages','timestamp']),
+        'note'      => $note,
+    ]);
+}
+
+/** Rebuild claim_sources for a book by scanning every live chapter's prose for
+ *  `[^cite:key]` tokens. Rebuildable cache; safe to run any time. Returns
+ *  ['links'=>N, 'unknown'=>[cite_key => [chapter_file,...]]] where "unknown" are
+ *  cited keys with no matching source — the hook for the P14 "claims to source"
+ *  diagnostic and a gentle "cite to a missing source" warning. */
+function reconcile_citations($book_id) {
+    ensure_sources();
+    q("DELETE FROM claim_sources WHERE book_id=?", [$book_id]);
+    $keyToId = [];
+    foreach (all("SELECT id,cite_key FROM sources WHERE book_id=?", [$book_id]) as $s) $keyToId[$s['cite_key']] = (int)$s['id'];
+    $links = 0; $unknown = [];
+    $chapters = all("SELECT file, body FROM chapters WHERE book_id=? AND status<>'archived' AND LOWER(file) NOT LIKE '%readme.md'", [$book_id]);
+    foreach ($chapters as $ch) {
+        $tokens = md_find_cite_tokens($ch['body']);
+        if (!$tokens) continue;
+        $counts = array_count_values($tokens);   // cite_key => hits in this chapter
+        foreach ($counts as $key => $hits) {
+            $sid = $keyToId[$key] ?? null;
+            q("INSERT INTO claim_sources (book_id,chapter_file,source_id,cite_key,hits) VALUES (?,?,?,?,?)",
+              [$book_id, $ch['file'], $sid, $key, (int)$hits]);
+            $links++;
+            if ($sid === null) $unknown[$key][] = $ch['file'];
+        }
+    }
+    return ['links'=>$links, 'unknown'=>$unknown];
+}
+
+/** Sources cited in one chapter (resolved joined to the source; unresolved keys
+ *  carried with source=null). Ordered by first the resolved, then the orphans. */
+function get_chapter_citations($book_id, $chapter_file) {
+    ensure_sources();
+    $rows = all("SELECT cs.cite_key, cs.hits, cs.source_id, s.type,s.author,s.title,s.year,s.publisher,s.url,s.accessed,s.locator
+                 FROM claim_sources cs LEFT JOIN sources s ON s.id=cs.source_id
+                 WHERE cs.book_id=? AND cs.chapter_file=?
+                 ORDER BY (cs.source_id IS NULL), LOWER(s.author), LOWER(s.title), cs.cite_key", [$book_id, $chapter_file]);
+    return $rows;
+}
+
+/** Chapters that cite a given source (for the References "cited in" list / an
+ *  Appearances-style panel). */
+function get_source_appearances($book_id, $source_id) {
+    ensure_sources();
+    return all("SELECT cs.chapter_file, cs.hits, c.id AS chapter_id, c.num, c.title
+                FROM claim_sources cs LEFT JOIN chapters c ON c.book_id=cs.book_id AND c.file=cs.chapter_file
+                WHERE cs.book_id=? AND cs.source_id=?
+                ORDER BY (c.num+0), c.num", [$book_id, (int)$source_id]);
+}
+
+/** The References view data: every source with how many chapters cite it and the
+ *  total hit count. */
+function get_references($book_id) {
+    ensure_sources();
+    $out = [];
+    foreach (get_sources($book_id) as $s) {
+        $s['chapterCount'] = (int) val("SELECT COUNT(DISTINCT chapter_file) FROM claim_sources WHERE book_id=? AND source_id=?", [$book_id, $s['id']]);
+        $s['citeCount']    = (int) val("SELECT COALESCE(SUM(hits),0) FROM claim_sources WHERE book_id=? AND source_id=?", [$book_id, $s['id']]);
+        $out[] = $s;
+    }
+    return $out;
+}
+
+/** Cite keys used in prose that have no matching source, book-wide. */
+function get_orphan_citations($book_id) {
+    ensure_sources();
+    return all("SELECT cite_key, COUNT(DISTINCT chapter_file) AS chapters, COALESCE(SUM(hits),0) AS hits
+                FROM claim_sources WHERE book_id=? AND source_id IS NULL GROUP BY cite_key ORDER BY cite_key", [$book_id]);
+}
+
+/* ============================================ SELF-HELP APPARATUS (Phase 13)
+ * Exercises and chapter takeaways are DERIVED from chapter prose (like scenes),
+ * so the folder .md stays canonical. `exercises` is a rebuildable projection of
+ * `## Exercise` / `> [!exercise]` blocks; takeaways are parsed on demand. The
+ * promise/payoff tracker reuses the existing threads table, relabelled per profile. */
+function ensure_exercises() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec("CREATE TABLE IF NOT EXISTS exercises (
+        id $pk, book_id VARCHAR(40) NOT NULL, chapter_id INT NOT NULL, ordinal INT DEFAULT 1,
+        title VARCHAR(255) DEFAULT '', type VARCHAR(40) DEFAULT '', est_time VARCHAR(60) DEFAULT '',
+        operationalizes VARCHAR(160) DEFAULT '', prompt MEDIUMTEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_ex_ch ON exercises (chapter_id)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_ex_book ON exercises (book_id)"); } catch (Exception $e) {}
+}
+
+/** Rebuild one chapter's exercises from its prose. Fully derived (nothing app-only
+ *  to preserve), so it's a straight delete + reinsert. Returns the count. */
+function reconcile_exercises($book_id, $chapter_id, $body) {
+    ensure_exercises();
+    q("DELETE FROM exercises WHERE chapter_id=?", [(int)$chapter_id]);
+    $ex = md_find_exercises($body);
+    foreach ($ex as $e)
+        q("INSERT INTO exercises (book_id,chapter_id,ordinal,title,type,est_time,operationalizes,prompt) VALUES (?,?,?,?,?,?,?,?)",
+          [$book_id, (int)$chapter_id, (int)$e['ordinal'], $e['title'], $e['type'], $e['est_time'], $e['operationalizes'], $e['prompt']]);
+    return count($ex);
+}
+
+/** Rebuild exercises for every live chapter in a book (reindex / lazy backfill). */
+function index_exercises($book_id) {
+    ensure_exercises();
+    $n = 0;
+    foreach (all("SELECT id,body FROM chapters WHERE book_id=? AND status<>'archived' AND LOWER(file) NOT LIKE '%readme.md'", [$book_id]) as $c)
+        $n += reconcile_exercises($book_id, (int)$c['id'], $c['body']);
+    return $n;
+}
+
+/** All exercises in a book, joined to their chapter for display + ordering. */
+function get_exercises($book_id) {
+    ensure_exercises();
+    return all("SELECT x.*, c.num AS chapter_num, c.title AS chapter_title, c.file AS chapter_file, c.sort_order AS chapter_sort
+                FROM exercises x JOIN chapters c ON c.id=x.chapter_id
+                WHERE x.book_id=? AND c.status<>'archived'
+                ORDER BY (c.num+0), c.num, x.ordinal", [$book_id]);
+}
+function get_chapter_exercises($chapter_id) {
+    ensure_exercises();
+    return all("SELECT * FROM exercises WHERE chapter_id=? ORDER BY ordinal", [(int)$chapter_id]);
+}
+function count_exercises($book_id) { ensure_exercises(); return (int) val("SELECT COUNT(*) FROM exercises x JOIN chapters c ON c.id=x.chapter_id WHERE x.book_id=? AND c.status<>'archived'", [$book_id]); }
+
+/** A chapter's takeaways / key points, parsed from its prose on demand. */
+function get_chapter_takeaways($body) { return md_find_takeaways($body); }
+
+/** Workbook data: per live chapter, its takeaways + exercises. Powers the
+ *  self-help Exercises/Workbook view and an eventual workbook export. */
+function get_workbook($book_id) {
+    ensure_exercises();
+    $out = [];
+    foreach (all("SELECT id,num,title,file,body FROM chapters WHERE book_id=? AND status<>'archived' AND LOWER(file) NOT LIKE '%readme.md' ORDER BY (num+0), num, file", [$book_id]) as $c) {
+        $takeaways = md_find_takeaways($c['body']);
+        $exercises = get_chapter_exercises((int)$c['id']);
+        if (!$takeaways && !$exercises) continue;
+        $out[] = ['chapter' => ['id'=>$c['id'],'num'=>$c['num'],'title'=>$c['title'],'file'=>$c['file']],
+                  'takeaways' => $takeaways, 'exercises' => $exercises];
+    }
+    return $out;
+}
+
+/** A human-readable reference string (a light, house-style citation). */
+function format_citation($s) {
+    $bits = [];
+    $author = trim((string)($s['author'] ?? ''));
+    $year   = trim((string)($s['year'] ?? ''));
+    $title  = trim((string)($s['title'] ?? ''));
+    $pub    = trim((string)($s['publisher'] ?? ''));
+    if ($author !== '') $bits[] = $author . ($year !== '' ? " ($year)" : '');
+    elseif ($year !== '') $bits[] = "($year)";
+    if ($title !== '') $bits[] = ($s['type'] ?? '') === 'article' ? '“' . $title . '”' : $title;
+    if ($pub !== '') $bits[] = $pub;
+    $out = implode('. ', array_filter($bits));
+    if ($out === '') $out = (string)($s['cite_key'] ?? 'untitled source');
+    return $out;
+}

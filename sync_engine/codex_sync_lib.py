@@ -19,16 +19,35 @@ A "db" is one of: characters locations factions objects lore
 """
 import os, re, json, glob, datetime
 
-DBS = ["characters", "locations", "factions", "objects", "lore"]
-
-# Mirrors the template's DBMETA (Stephen's Codex design).
+# Mirrors the web app's resolved database set — the fiction base (md.php DBMETA)
+# plus every non-fiction database declared across profiles (profiles.php
+# all_dbmeta(), Phase 10/11). Folder names are unique per key, so a book only ever
+# has the folders of its own profile; scanning the union just yields empty globs
+# for the folders a given book doesn't use. Keep aligned with profiles.php.
 DBMETA = {
+    # fiction
     "characters": {"title": "Characters", "singular": "Character", "letter": "C", "hue": "#5b54b8", "folder": "Characters", "detailLabel": "Species"},
     "locations":  {"title": "Locations",  "singular": "Location",  "letter": "L", "hue": "#4F7A52", "folder": "Locations",  "detailLabel": "Scale"},
     "factions":   {"title": "Factions",   "singular": "Faction",   "letter": "F", "hue": "#A85648", "folder": "Factions",   "detailLabel": "Kind"},
     "objects":    {"title": "Objects",    "singular": "Object",    "letter": "O", "hue": "#3D7D80", "folder": "Objects",    "detailLabel": "Class"},
     "lore":       {"title": "Lore",       "singular": "Lore",      "letter": "K", "hue": "#7A5AA0", "folder": "Lore",       "detailLabel": "Domain"},
+    # non-fiction / self-help / memoir (Phase 11)
+    "concepts":      {"title": "Concepts",      "singular": "Concept",      "letter": "C", "hue": "#7A5AA0", "folder": "Concepts",      "detailLabel": "Domain"},
+    "people":        {"title": "People",        "singular": "Person",       "letter": "P", "hue": "#5b54b8", "folder": "People",        "detailLabel": "Affiliation"},
+    "sources":       {"title": "Sources",       "singular": "Source",       "letter": "S", "hue": "#3D7D80", "folder": "Sources",       "detailLabel": "Kind"},
+    "organizations": {"title": "Organizations", "singular": "Organization", "letter": "O", "hue": "#A85648", "folder": "Organizations", "detailLabel": "Kind"},
+    "methods":       {"title": "Methods",       "singular": "Method",       "letter": "M", "hue": "#4F7A52", "folder": "Methods",       "detailLabel": "Class"},
+    "exercises":     {"title": "Exercises",     "singular": "Exercise",     "letter": "E", "hue": "#C9933A", "folder": "Exercises",     "detailLabel": "Type"},
+    "places":        {"title": "Places",        "singular": "Place",        "letter": "L", "hue": "#4F7A52", "folder": "Places",        "detailLabel": "Scale"},
+    "themes":        {"title": "Themes",        "singular": "Theme",        "letter": "T", "hue": "#A85648", "folder": "Themes",        "detailLabel": "Kind"},
 }
+
+# db keys to scan as generic entries, fiction first (dict preserves insertion
+# order). A book only has the folders of its own profile, so the extra keys are
+# empty globs elsewhere. EXCLUDED on the web side: "sources" is a dedicated
+# citations table (Phase 12) and "exercises" are derived from chapter prose
+# (Phase 13) — neither is a generic entry database.
+DBS = [k for k in DBMETA if k not in ("sources", "exercises")]
 
 STATUS_VALUES = ["seed", "sketch", "canon"]
 

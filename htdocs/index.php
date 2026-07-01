@@ -84,8 +84,16 @@ if ($method === 'POST') {
         $db = $_POST['db']; $name = trim($_POST['name']);
         $slug = $_POST['slug'] ?: strtolower(preg_replace('/[^a-z0-9]+/i','-', $name));
         $slug = trim(preg_replace('/-+/', '-', $slug), '-');
-        $stub = "# $name\n\n- **Slug:** $slug\n- **Status:** seed\n- **Type:** " . DBMETA[$db]['singular']
-              . "\n- **" . DBMETA[$db]['detailLabel'] . ":** \n- **First appearance:** \n\n## Overview\n\n";
+        $meta = dbmeta($db, book_profile($book));
+        // Profile field template prefills extra labels (fiction adds none, so its
+        // stub stays byte-for-byte the legacy one). Skip the detail label / first
+        // appearance, which the stub already prints.
+        $skip = ['slug','status','type','first appearance', strtolower($meta['detailLabel'])];
+        $tmpl = '';
+        foreach (field_template_for(book_profile($book), $db) as $lbl)
+            if (!in_array(strtolower($lbl), $skip, true)) $tmpl .= "- **$lbl:** \n";
+        $stub = "# $name\n\n- **Slug:** $slug\n- **Status:** seed\n- **Type:** " . $meta['singular']
+              . "\n- **" . $meta['detailLabel'] . ":** \n- **First appearance:** \n" . $tmpl . "\n## Overview\n\n";
         $e = md_parse_entry($stub, $db, $slug);
         save_entry($book, $db, $e);
         flash('Created “' . $name . '”. Now fill it in.');
@@ -173,6 +181,29 @@ if ($method === 'POST') {
         if ($r['status'] === 'conflict' || $r['status'] === 'error')
             redirect(['p'=>'chapter_edit','book'=>$book,'id'=>$_POST['cid']]);
         redirect(['p'=>'chapter','book'=>$book,'id'=>$_POST['cid']]);
+    }
+    if ($a === 'book_profile') {
+        set_book_profile($book, $_POST['profile'] ?? 'fiction');
+        flash('Book profile set to “'.profile_label($_POST['profile'] ?? 'fiction').'”.');
+        redirect(['p'=>'book','book'=>$book]);
+    }
+    if ($a === 'source_save') {
+        $sid = save_source($book, [
+            'id'=>$_POST['id']??'', 'cite_key'=>$_POST['cite_key']??'', 'type'=>$_POST['type']??'web',
+            'author'=>$_POST['author']??'', 'title'=>$_POST['title']??'', 'year'=>$_POST['year']??'',
+            'publisher'=>$_POST['publisher']??'', 'url'=>$_POST['url']??'', 'accessed'=>$_POST['accessed']??'',
+            'locator'=>$_POST['locator']??'', 'note'=>$_POST['note']??'',
+        ]);
+        reconcile_citations($book);   // a new/edited source can resolve orphan cite keys
+        $src = get_source($book, $sid);
+        flash('Saved source “'.($src ? format_citation($src) : ($_POST['cite_key']??'')).'”.');
+        redirect(['p'=>'references','book'=>$book]);
+    }
+    if ($a === 'source_delete') {
+        delete_source($book, (int)($_POST['id']??0));
+        reconcile_citations($book);
+        flash('Source deleted; any [^cite:…] tokens now show as unresolved.');
+        redirect(['p'=>'references','book'=>$book]);
     }
     if ($a === 'act_add')   { add_act($book, $_POST['title'] ?? ''); redirect(['p'=>'manuscript','book'=>$book,'view'=>'grid']); }
     if ($a === 'act_rename'){ rename_act((int)($_POST['id'] ?? 0), $book, $_POST['title'] ?? '', $_POST['subtitle'] ?? ''); redirect(['p'=>'manuscript','book'=>$book,'view'=>'grid']); }
@@ -287,7 +318,9 @@ if (!$book && !in_array($p, ['library','sync','overview'], true)) { $bks = get_b
 $GLOBALS['__link_book'] = $book_id;
 
 $titles = ['overview'=>'Overview','library'=>'Library','book'=>$book['title']??'Book','db'=>'Database','entry'=>'Entry',
-           'manuscript'=>'Manuscript','chapter'=>'Chapter','chapter_edit'=>'Edit chapter','diagnostics'=>'Diagnostics','progressions'=>'Progressions','timeline'=>'Timeline','threads'=>'Open threads',
+           'manuscript'=>'Manuscript','chapter'=>'Chapter','chapter_edit'=>'Edit chapter','diagnostics'=>'Diagnostics','progressions'=>'Progressions','timeline'=>'Timeline',
+           'threads'=>($book ? threads_label($book['profile'] ?? 'fiction')['title'] : 'Open threads'),
+           'references'=>'References','exercises'=>'Exercises',
            'tasks'=>'Tasks','log'=>'Writing log','meta'=>'Meta','notes'=>'Notes','sync'=>'Sync',
            'plot'=>'Plot board','vision'=>'Mood board'];
 layout_head($titles[$p] ?? 'Codex', $accent, $bodyType, $density, $mode);
@@ -305,7 +338,7 @@ echo '<div class="content'.($wideView ? ' wide' : '').'">';
 if (!empty($_SESSION['flash'])) { [$m,$t]=$_SESSION['flash']; echo '<div class="flash '.($t==='err'?'err':'').'">'.e($m).'</div>'; unset($_SESSION['flash']); }
 
 /* helper renderers */
-function db_chip($db){ $m=DBMETA[$db]; return '<span class="chip" style="background:'.$m['hue'].'">'.$m['letter'].'</span>'; }
+function db_chip($db){ $m=dbmeta($db); return '<span class="chip" style="background:'.$m['hue'].'">'.$m['letter'].'</span>'; }
 function status_select($book_id, $c, $return){
     $opts = '';
     foreach (['outline','drafted','revised'] as $s)
@@ -396,11 +429,21 @@ case 'library':
     break;
 
 case 'book':
+    $bprofile = $book['profile'] ?? 'fiction';
     echo '<div class="pagehead"><div><h1>'.e($book['title']).'</h1>';
     echo '<p class="desc"><strong>'.e($book['series']).' · Book '.e($book['num']).'</strong> — '.e($book['logline'] ?: 'No logline yet.').'</p></div></div>';
     echo '<div class="bt-stats" style="margin:6px 0 4px"><span><b>'.number_format($book['wordCount']).'</b> words</span><span><b>'.$book['chapterCount'].'</b> chapters</span><span><b>'.$book['entryCount'].'</b> entries</span><span><b>'.$book['threadCount'].'</b> open threads</span></div>';
+    // Profile picker — selects the codex taxonomy (databases, field templates,
+    // manuscript band labels, diagnostics) for this book. Fiction is the default.
+    echo '<form method="post" class="profileform" style="margin:10px 0 2px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'
+       . '<input type="hidden" name="action" value="book_profile"><input type="hidden" name="book" value="'.e($book['id']).'">'
+       . '<label class="f" style="margin:0">Book profile</label><select name="profile" onchange="this.form.submit()">';
+    foreach (profile_ids() as $pid)
+        echo '<option value="'.e($pid).'"'.($pid===$bprofile?' selected':'').'>'.e(profile_label($pid)).'</option>';
+    echo '</select><span class="muted" style="font-size:12px">'.e(profile_desc($bprofile)).'</span>'
+       . '<noscript><button class="btn sm">Set</button></noscript></form>';
     echo '<h2 style="font-size:15px;margin-top:26px">Databases in this book</h2><div class="cards">';
-    foreach (DB_KEYS as $k) { $m=DBMETA[$k]; $c=(int)val("SELECT COUNT(*) FROM entries WHERE book_id=? AND db_key=?",[$book['id'],$k]);
+    foreach (db_keys_for($bprofile) as $k) { $m=dbmeta($k,$bprofile); $c=(int)val("SELECT COUNT(*) FROM entries WHERE book_id=? AND db_key=?",[$book['id'],$k]);
         echo '<a class="card" href="'.url(['p'=>'db','book'=>$book['id'],'db'=>$k]).'"><div class="cmeta">'.db_chip($k).'<span class="ctitle" style="margin:0">'.$m['title'].'</span><span class="count" style="margin-left:auto">'.$c.'</span></div><div class="clog">'.e($m['desc']).'</div></a>';
     }
     echo '</div>';
@@ -412,7 +455,7 @@ case 'book':
     $sections = [
         ['manuscript','Manuscript','#8A6A3E',$book['chapterCount'],'Read chapters, set status, track word counts.'],
         ['progressions','Progressions','#C9933A',$progN,'Confirmed story movement, chapter by chapter.'],
-        ['threads','Open threads','#C25A6E',$book['threadCount'],'Unresolved questions pulled from entries.'],
+        ['threads',threads_label($bprofile)['title'],'#C25A6E',$book['threadCount'],threads_label($bprofile)['desc']],
         ['tasks','Tasks','#5b54b8',$book['taskCount'],'To-dos — flag any for Claude to run.'],
         ['log','Writing log','#4F7A52',$logN,'Writing sessions and word deltas.'],
         ['meta','Meta','#7A715F',$metaN,'Workspace rules and notes for this book.'],
@@ -432,8 +475,95 @@ case 'book':
         echo '</table>'; }
     break;
 
+case 'references':
+    // Phase 12: the References view — sources for the book + a per-source "cited in"
+    // list, plus an add/edit form. Cite a passage in prose with [^cite:key]; the
+    // key resolves against a source's cite_key.
+    $refs = get_references($book['id']);
+    $orphans = get_orphan_citations($book['id']);
+    $edit = isset($_GET['edit']) ? get_source($book['id'], (int)$_GET['edit']) : null;
+    $prefillKey = $edit ? $edit['cite_key'] : ($_GET['key'] ?? '');
+    echo '<div class="pagehead"><div><h1>References</h1><p class="desc">Sources behind this book\'s claims. Cite a passage in your prose with <code>[^cite:key]</code> — the key resolves to a source here, and the folder file stays the source of truth.</p></div></div>';
+
+    if ($orphans) {
+        echo '<div class="flash err" style="text-align:left">Cited in prose but not yet defined as a source: ';
+        $bits = [];
+        foreach ($orphans as $o) $bits[] = '<a href="'.url(['p'=>'references','book'=>$book['id'],'key'=>$o['cite_key']]).'#addsource"><code>'.e($o['cite_key']).'</code></a> <span class="muted">('.(int)$o['chapters'].' ch)</span>';
+        echo implode(' · ', $bits).'. Add each below to resolve it.</div>';
+    }
+
+    if ($refs) {
+        echo '<table class="grid"><tr><th>Reference</th><th>Type</th><th>Key</th><th>Cited in</th><th></th></tr>';
+        foreach ($refs as $s) {
+            echo '<tr id="src-'.e($s['cite_key']).'"><td><strong>'.e(format_citation($s)).'</strong>'
+               . ($s['url']!==''?' <a class="muted mono" href="'.e($s['url']).'" target="_blank" rel="noopener">link</a>':'')
+               . ($s['note']!==''?'<div class="clog">'.inline_md($s['note']).'</div>':'').'</td>';
+            echo '<td><span class="pill">'.e($s['type']).'</span></td><td class="mono">'.e($s['cite_key']).'</td>';
+            $apps = get_source_appearances($book['id'], $s['id']);
+            echo '<td>';
+            if ($apps) { $links=[]; foreach ($apps as $ap) { $lab = $ap['chapter_id'] ? url(['p'=>'chapter','book'=>$book['id'],'id'=>$ap['chapter_id']]) : ''; $t = 'Ch '.e($ap['num']).' ×'.(int)$ap['hits']; $links[] = $lab ? '<a href="'.$lab.'">'.$t.'</a>' : $t; } echo implode(', ', $links); }
+            else echo '<span class="muted">—</span>';
+            echo '</td>';
+            echo '<td class="mono"><a class="btn sm" href="'.url(['p'=>'references','book'=>$book['id'],'edit'=>$s['id']]).'#addsource">Edit</a> '
+               . '<form method="post" style="display:inline" onsubmit="return confirm(\'Delete this source?\')"><input type="hidden" name="action" value="source_delete"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="id" value="'.(int)$s['id'].'"><button class="btn sm danger">×</button></form></td></tr>';
+        }
+        echo '</table>';
+    } else echo '<p class="empty">No sources yet. Add one below, or author them as <span class="mono">Codex/Sources/&lt;key&gt;.md</span> and sync.</p>';
+
+    // add / edit form
+    echo '<div class="notewrap" id="addsource" style="margin-top:22px"><form method="post"><input type="hidden" name="action" value="source_save"><input type="hidden" name="book" value="'.e($book['id']).'">';
+    if ($edit) echo '<input type="hidden" name="id" value="'.(int)$edit['id'].'">';
+    echo '<h2 style="font-size:15px;margin:0 0 8px">'.($edit?'Edit source':'Add a source').'</h2>';
+    echo '<div class="formrow"><div><label class="f">Cite key</label><input type="text" name="cite_key" placeholder="keynes-1936" value="'.e($edit['cite_key'] ?? $prefillKey).'"></div>';
+    echo '<div><label class="f">Type</label><select name="type">';
+    foreach (source_types() as $t) echo '<option value="'.$t.'"'.((($edit['type'] ?? 'web')===$t)?' selected':'').'>'.ucfirst($t).'</option>';
+    echo '</select></div></div>';
+    echo '<label class="f">Author</label><input type="text" name="author" value="'.e($edit['author'] ?? '').'">';
+    echo '<label class="f">Title</label><input type="text" name="title" value="'.e($edit['title'] ?? '').'">';
+    echo '<div class="formrow"><div><label class="f">Year</label><input type="text" name="year" value="'.e($edit['year'] ?? '').'"></div>';
+    echo '<div><label class="f">Publisher / journal</label><input type="text" name="publisher" value="'.e($edit['publisher'] ?? '').'"></div></div>';
+    echo '<label class="f">URL / DOI</label><input type="text" name="url" value="'.e($edit['url'] ?? '').'">';
+    echo '<div class="formrow"><div><label class="f">Accessed</label><input type="text" name="accessed" placeholder="2026-07-01" value="'.e($edit['accessed'] ?? '').'"></div>';
+    echo '<div><label class="f">Locator (page / timestamp)</label><input type="text" name="locator" value="'.e($edit['locator'] ?? '').'"></div></div>';
+    echo '<label class="f">Note (optional)</label><textarea name="note" style="min-height:56px">'.e($edit['note'] ?? '').'</textarea>';
+    echo '<div class="toolbar"><button class="btn primary">'.($edit?'Save changes':'Add source').'</button>';
+    if ($edit) echo '<a class="btn" href="'.url(['p'=>'references','book'=>$book['id']]).'">Cancel</a>';
+    echo '</div></form></div>';
+    break;
+
+case 'exercises':
+    // Phase 13: the self-help Workbook — takeaways + exercises per chapter, all
+    // derived from prose. index_exercises() backfills chapters synced before P13.
+    index_exercises($book['id']);
+    $wb = get_workbook($book['id']);
+    $exN = count_exercises($book['id']);
+    echo '<div class="pagehead"><div><h1>Exercises &amp; workbook</h1><p class="desc">'.$exN.' exercise'.($exN==1?'':'s').' across the book, plus each chapter\'s takeaways. Authored in your prose as <code>## Exercise</code> blocks and <code>## Takeaways</code> lists — the folder stays the source of truth.</p></div></div>';
+    if (!$wb) { echo '<p class="empty">No exercises or takeaways found yet. Add a <span class="mono">## Exercise</span> section or a <span class="mono">## Takeaways</span> list to a chapter, then sync.</p>'; break; }
+    foreach ($wb as $w) {
+        $ch = $w['chapter'];
+        echo '<div class="entrybody" style="margin-bottom:18px"><h2 style="margin-top:0"><a href="'.url(['p'=>'chapter','book'=>$book['id'],'id'=>$ch['id']]).'"><span class="mono">'.e($ch['num']).'</span> '.e($ch['title']).'</a></h2>';
+        if ($w['takeaways']) {
+            echo '<div class="sp-label">Takeaways</div><ul>';
+            foreach ($w['takeaways'] as $t) echo '<li>'.inline_md($t).'</li>';
+            echo '</ul>';
+        }
+        foreach ($w['exercises'] as $ex) {
+            echo '<div class="exercise" style="border:1px solid var(--accent-soft,#ddd);border-radius:8px;padding:10px 12px;margin:10px 0">';
+            echo '<div class="cmeta"><strong>'.e($ex['title']).'</strong>';
+            if ($ex['type'] !== '') echo ' <span class="pill">'.e($ex['type']).'</span>';
+            if ($ex['est_time'] !== '') echo ' <span class="muted mono">'.e($ex['est_time']).'</span>';
+            if ($ex['operationalizes'] !== '') { $op=one("SELECT db_key,name FROM entries WHERE book_id=? AND slug=?",[$book['id'],$ex['operationalizes']]);
+                echo ' <span class="muted">→ '.($op?'<a href="'.url(['p'=>'entry','book'=>$book['id'],'db'=>$op['db_key'],'slug'=>$ex['operationalizes']]).'">'.e($op['name']).'</a>':e($ex['operationalizes'])).'</span>'; }
+            echo '</div>';
+            if (trim((string)$ex['prompt']) !== '') echo '<div class="clog">'.md_to_html($ex['prompt'], $book['id']).'</div>';
+            echo '</div>';
+        }
+        echo '</div>';
+    }
+    break;
+
 case 'db':
-    $db = $_GET['db']; $m = DBMETA[$db];
+    $db = $_GET['db']; $m = dbmeta($db, $book['profile'] ?? 'fiction');
     $rows = get_entries($book['id'], $db);
     echo '<div class="pagehead">'.db_chip($db).'<div><h1>'.$m['title'].'</h1><p class="desc">'.e($m['desc']).'</p></div></div>';
     echo '<div class="toolbar"><a class="btn primary sm" href="'.url(['p'=>'entry_new','book'=>$book['id'],'db'=>$db]).'">+ New '.strtolower($m['singular']).'</a></div>';
@@ -452,7 +582,8 @@ case 'entry':
     $e = get_entry($book['id'], $db, $slug);
     if (!$e) { echo '<p class="empty">Entry not found.</p>'; break; }
     echo '<div class="pagehead">'.db_chip($db).'<div><h1>'.e($e['name']).' '.status_pill($e['status']).'</h1>';
-    echo '<p class="desc"><span class="tag" style="color:'.DBMETA[$db]['hue'].';background:'.DBMETA[$db]['hue'].'18">'.e($e['type']).'</span> '.($e['firstApp']?'· first appearance '.e($e['firstApp']):'').'</p></div></div>';
+    $emeta = dbmeta($db, $book['profile'] ?? 'fiction');
+    echo '<p class="desc"><span class="tag" style="color:'.$emeta['hue'].';background:'.$emeta['hue'].'18">'.e($e['type']).'</span> '.($e['firstApp']?'· first appearance '.e($e['firstApp']):'').'</p></div></div>';
     echo '<div class="toolbar"><a class="btn sm" href="'.url(['p'=>'entry_edit','book'=>$book['id'],'db'=>$db,'slug'=>$slug]).'">Edit</a>'
        . '<a class="btn sm" href="'.url(['p'=>'entry_md','book'=>$book['id'],'db'=>$db,'slug'=>$slug]).'">View .md</a></div>';
     echo '<div class="entrybody">';
@@ -564,7 +695,7 @@ case 'entry_edit':
     break;
 
 case 'entry_new':
-    $db = $_GET['db']; $m = DBMETA[$db];
+    $db = $_GET['db']; $m = dbmeta($db, $book['profile'] ?? 'fiction');
     echo '<div class="pagehead">'.db_chip($db).'<div><h1>New '.strtolower($m['singular']).'</h1></div></div>';
     echo '<form method="post" style="max-width:520px"><input type="hidden" name="action" value="entry_new"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="db" value="'.e($db).'">';
     echo '<label class="f">Name</label><input type="text" name="name" required autofocus>';
@@ -584,6 +715,8 @@ case 'manuscript':
     if ($view === 'grid' && $ch) {
         // Act bands → chapter columns → scene cards (read-only). Acts have no CRUD
         // yet, so chapters with no act_id fall into a single "Chapters" band.
+        $bandLbl = bands_for($book['profile'] ?? 'fiction');   // Act/Acts vs Part/Parts per profile
+        $actS = $bandLbl['actSingular']; $actP = $bandLbl['actPlural'];
         $acts = get_acts($book['id']);
         $byAct = [];
         foreach ($ch as $c) { $k = ($c['act_id'] !== null && $c['act_id'] !== '') ? (int)$c['act_id'] : 0; $byAct[$k][] = $c; }
@@ -604,12 +737,12 @@ case 'manuscript':
         if (!empty($byAct[0])) $bands[] = [null, $byAct[0]];
         // ---- Acts manager: create / rename / reorder / delete ----
         $bh = '<input type="hidden" name="book" value="'.e($book['id']).'">';
-        echo '<div class="acts-mgr"><div class="acts-mgr-h">Acts</div>';
+        echo '<div class="acts-mgr"><div class="acts-mgr-h">'.e($actP).'</div>';
         $nacts = count($acts);
         foreach ($acts as $i => $a) {
             echo '<div class="act-row">';
             echo '<form method="post" class="act-edit"><input type="hidden" name="action" value="act_rename">'.$bh.'<input type="hidden" name="id" value="'.(int)$a['id'].'">'
-               . '<input class="act-title-in" name="title" value="'.e($a['title']).'" placeholder="Act title">'
+               . '<input class="act-title-in" name="title" value="'.e($a['title']).'" placeholder="'.e($actS).' title">'
                . '<input class="act-sub-in" name="subtitle" value="'.e($a['subtitle']).'" placeholder="Subtitle (optional)">'
                . '<button class="btn sm">Save</button></form>';
             if ($i > 0)          echo '<form method="post"><input type="hidden" name="action" value="act_move">'.$bh.'<input type="hidden" name="id" value="'.(int)$a['id'].'"><input type="hidden" name="dir" value="up"><button class="btn sm" title="Move up">↑</button></form>';
@@ -617,9 +750,9 @@ case 'manuscript':
             echo '<form method="post" onsubmit="return confirm(\'Delete this act? Its chapters become unassigned (prose untouched).\')"><input type="hidden" name="action" value="act_delete">'.$bh.'<input type="hidden" name="id" value="'.(int)$a['id'].'"><button class="btn sm danger">Delete</button></form>';
             echo '</div>';
         }
-        echo '<form method="post" class="act-add"><input type="hidden" name="action" value="act_add">'.$bh.'<input name="title" placeholder="New act title" required><button class="btn sm primary">+ Add act</button></form>';
+        echo '<form method="post" class="act-add"><input type="hidden" name="action" value="act_add">'.$bh.'<input name="title" placeholder="New '.e(strtolower($actS)).' title" required><button class="btn sm primary">+ Add '.e(strtolower($actS)).'</button></form>';
         echo '</div>';
-        echo '<p class="grid-hint">Drag a chapter\'s ⠿ handle to reorder it or move it between acts. Drag a scene\'s ⠿ handle to reorder scenes within a chapter — <strong>planning only</strong>; your prose isn\'t changed.</p>';
+        echo '<p class="grid-hint">Drag a chapter\'s ⠿ handle to reorder it or move it between '.e(strtolower($actP)).'. Drag a scene\'s ⠿ handle to reorder scenes within a chapter — <strong>planning only</strong>; your prose isn\'t changed.</p>';
         echo '<div class="mgrid">';
         foreach ($bands as $bd) {
             list($a, $cols) = $bd;
@@ -631,13 +764,13 @@ case 'manuscript':
                 $counted = 0;
                 foreach ($scenes as $s2) if (!scene_label_excluded($s2['label'])) $counted += (int)$s2['word_count'];
                 echo '<div class="mcol" data-cid="'.(int)$c['id'].'">'
-                   . '<span class="mcol-handle" draggable="true" title="Drag to reorder / move between acts">⠿</span>'
+                   . '<span class="mcol-handle" draggable="true" title="Drag to reorder / move between '.e(strtolower($actP)).'">⠿</span>'
                    . '<a class="mcol-h" href="'.url(['p'=>'chapter','book'=>$book['id'],'id'=>$c['id']]).'">'
                    . '<span class="mcol-t"><span class="mono">'.e($c['num']).'</span> '.e($c['title']).'</span>'
                    . '<span class="mcol-wc">'.number_format($counted).' words</span></a>';
                 if ($acts) {
                     echo '<form method="post" class="mcol-act"><input type="hidden" name="action" value="chapter_act">'.$bh.'<input type="hidden" name="cid" value="'.(int)$c['id'].'">'
-                       . '<select name="act_id" onchange="this.form.submit()"><option value="">— no act —</option>';
+                       . '<select name="act_id" onchange="this.form.submit()"><option value="">— no '.e(strtolower($actS)).' —</option>';
                     foreach ($acts as $aopt)
                         echo '<option value="'.(int)$aopt['id'].'"'.(((int)($c['act_id'] ?? 0)) === (int)$aopt['id'] ? ' selected' : '').'>'.e($aopt['title']).'</option>';
                     echo '</select></form>';
@@ -844,12 +977,50 @@ case 'chapter':
            . '<div class="sr-empty" id="srEmpty">No Codex names detected yet.</div>'
            . '<div class="sr-note">Mentions update live as you write. Names from your Codex auto-link.</div></aside>';
         echo '</div>';
+        // --- Phase 12: citations in this chapter (from [^cite:key] tokens) ---
+        $cites = get_chapter_citations($book['id'], $c['file']);
+        if ($cites) {
+            echo '<div class="entrybody"><h2>Citations <span class="muted mono">'.count($cites).'</span></h2><ol class="refs">';
+            foreach ($cites as $ci) {
+                $hits = (int)$ci['hits'] > 1 ? ' <span class="muted mono">×'.(int)$ci['hits'].'</span>' : '';
+                if ($ci['source_id']) {
+                    echo '<li><a href="'.url(['p'=>'references','book'=>$book['id']]).'#src-'.rawurlencode($ci['cite_key']).'">'.e(format_citation($ci)).'</a>'.$hits.'</li>';
+                } else {
+                    echo '<li><code>'.e($ci['cite_key']).'</code> <span class="pill err">unresolved</span> — <a href="'.url(['p'=>'references','book'=>$book['id'],'key'=>$ci['cite_key']]).'#addsource">add source</a>'.$hits.'</li>';
+                }
+            }
+            echo '</ol></div>';
+        }
+        // --- Phase 13: takeaways + exercises for this chapter (derived from prose) ---
+        $takeaways = get_chapter_takeaways($c['body']);
+        if ($takeaways) {
+            echo '<div class="entrybody"><h2>Takeaways</h2><ul>';
+            foreach ($takeaways as $t) echo '<li>'.inline_md($t).'</li>';
+            echo '</ul></div>';
+        }
+        reconcile_exercises($book['id'], (int)$c['id'], $c['body']);   // keep in sync on view
+        $chEx = get_chapter_exercises((int)$c['id']);
+        if ($chEx) {
+            echo '<div class="entrybody"><h2>Exercises <span class="muted mono">'.count($chEx).'</span></h2>';
+            foreach ($chEx as $ex) {
+                echo '<div class="exercise" style="border:1px solid var(--accent-soft,#ddd);border-radius:8px;padding:10px 12px;margin:10px 0">';
+                echo '<div class="cmeta"><strong>'.e($ex['title']).'</strong>';
+                if ($ex['type'] !== '') echo ' <span class="pill">'.e($ex['type']).'</span>';
+                if ($ex['est_time'] !== '') echo ' <span class="muted mono">'.e($ex['est_time']).'</span>';
+                if ($ex['operationalizes'] !== '') { $op=one("SELECT db_key,name FROM entries WHERE book_id=? AND slug=?",[$book['id'],$ex['operationalizes']]);
+                    echo ' <span class="muted">→ '.($op?'<a href="'.url(['p'=>'entry','book'=>$book['id'],'db'=>$op['db_key'],'slug'=>$ex['operationalizes']]).'">'.e($op['name']).'</a>':e($ex['operationalizes'])).'</span>'; }
+                echo '</div>';
+                if (trim((string)$ex['prompt']) !== '') echo '<div class="clog">'.md_to_html($ex['prompt'], $book['id']).'</div>';
+                echo '</div>';
+            }
+            echo '</div>';
+        }
         // data for the client-side tally: targets (longest-first), entity map, db colours
         if (function_exists('build_mention_targets')) {
             $emeta = []; $dbcolor = [];
             foreach (all("SELECT slug,name,db_key,detail,type FROM entries WHERE book_id=?", [$book['id']]) as $r)
                 $emeta[$r['slug']] = ['name'=>$r['name'],'db'=>$r['db_key'],'detail'=>trim((string)($r['detail'] ?: $r['type']))];
-            foreach (DBMETA as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
+            foreach (dbmeta_for($book['profile'] ?? 'fiction') as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
             $tg = array_map(function($t){ return ['phrase'=>$t['phrase'],'slug'=>$t['slug']]; }, build_mention_targets($book['id']));
             echo '<script>window.__scene='.json_encode(['book'=>$book['id'],'targets'=>$tg,'meta'=>$emeta,'db'=>$dbcolor], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).';</script>';
             echo <<<'JS'
@@ -1004,7 +1175,7 @@ case 'chapter_edit':
     if (function_exists('build_mention_targets')) {
         $emeta = []; $dbcolor = [];
         foreach (all("SELECT slug,name,db_key FROM entries WHERE book_id=?", [$book['id']]) as $r) $emeta[$r['slug']] = ['name'=>$r['name'],'db'=>$r['db_key']];
-        foreach (DBMETA as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
+        foreach (dbmeta_for($book['profile'] ?? 'fiction') as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
         $tg = array_map(function($t){ return ['phrase'=>$t['phrase'],'slug'=>$t['slug']]; }, build_mention_targets($book['id']));
         echo '<script>window.__scene='.json_encode(['book'=>$book['id'],'targets'=>$tg,'meta'=>$emeta,'db'=>$dbcolor], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).';</script>';
         echo <<<'JS'
@@ -1133,7 +1304,61 @@ case 'timeline':
 
 case 'diagnostics':
     $cid = (int)($_GET['id'] ?? 0);
-    if (!$cid) {   // ---- book-level summary ----
+    $dgFlags = diagnostics_for($book['profile'] ?? 'fiction');
+    $nfDiag = !empty($dgFlags['readability']) || !empty($dgFlags['citations']) || !empty($dgFlags['jargon']) || !empty($dgFlags['repetition']);
+    if (!$cid && $nfDiag) {   // ---- non-fiction book-level battery (Phase 14) ----
+        $D = get_nonfiction_diagnostics($book['id']);
+        echo '<div class="pagehead"><div><h1>Diagnostics</h1><p class="desc">Non-fiction battery — citation coverage, readability, cross-chapter repetition, undefined terms'.(!empty($dgFlags['promises'])?', reader promises':'').'. These are <strong>patterns to review</strong>, never auto-applied. Click a chapter for detail.</p></div></div>';
+        if (!$D['chapters']) { echo '<p class="empty">No chapters to analyze yet.</p>'; break; }
+        echo '<table class="grid"><tr><th>Chapter</th><th>Words</th><th>Readability (FK grade)</th><th>Claims to source</th><th>Patterns</th></tr>';
+        foreach ($D['chapters'] as $r) {
+            $ch = $r['chapter']; $label = trim('Ch. '.$ch['num'].' '.($ch['title'] ? '— '.$ch['title'] : ''));
+            $grade = $r['readability']['grade'] ?? null;
+            $uns = $r['citations']['unsupported'] ?? 0;
+            echo '<tr><td><a href="'.url(['p'=>'diagnostics','book'=>$book['id'],'id'=>$ch['id']]).'">'.e($label).'</a></td>'
+               . '<td class="mono">'.number_format((int)$r['words']).'</td>'
+               . '<td class="mono">'.($grade===null?'—':e((string)$grade).(($grade>14)?' <span class="diag-sev sev-med">dense</span>':'')).'</td>'
+               . '<td class="mono">'.((int)$uns ? '<strong>'.(int)$uns.'</strong>' : '0').'</td>'
+               . '<td class="mono">'.(int)$r['patterns'].'</td></tr>';
+        }
+        echo '</table>';
+        // Citation coverage (orphan cite keys, book-wide) — from P12
+        if (!empty($dgFlags['citations']) && $D['orphans']) {
+            echo '<div class="diag-sec"><h2>Claims to source <span class="muted mono">'.count($D['orphans']).'</span></h2><p class="muted">Cited in prose with no matching source. <a href="'.url(['p'=>'references','book'=>$book['id']]).'">References →</a></p><div class="diag-chips">';
+            foreach ($D['orphans'] as $o) echo '<span class="diag-chip"><code>'.e($o['cite_key']).'</code> <span class="muted mono">'.(int)$o['chapters'].' ch</span></span>';
+            echo '</div></div>';
+        }
+        // Cross-chapter repetition
+        if (!empty($dgFlags['repetition'])) {
+            echo '<div class="diag-sec"><h2>Cross-chapter repetition <span class="muted mono">'.count($D['repetition']).'</span></h2>';
+            if ($D['repetition']) { echo '<ul class="diag-list">';
+                foreach ($D['repetition'] as $r) echo '<li><span class="diag-detail">“'.e($r['phrase']).'”</span><span class="muted mono">'.implode(', ', array_map('htmlspecialchars', $r['chapters'])).'</span></li>';
+                echo '</ul>';
+            } else echo '<p class="muted">No phrases repeated across chapters.</p>';
+            echo '</div>';
+        }
+        // Undefined terms
+        if (!empty($dgFlags['jargon'])) {
+            echo '<div class="diag-sec"><h2>Undefined terms <span class="muted mono">'.count($D['undefined']).'</span></h2>';
+            if ($D['undefined']) { echo '<p class="muted">Concepts referenced in prose that still have no definition.</p><div class="diag-chips">';
+                foreach ($D['undefined'] as $u) echo '<a class="diag-chip" href="'.url(['p'=>'entry','book'=>$book['id'],'db'=>'concepts','slug'=>$u['slug']]).'">'.e($u['name']).' <span class="muted mono">×'.(int)$u['mentions'].'</span></a>';
+                echo '</div>';
+            } else echo '<p class="muted">Every referenced concept has a definition.</p>';
+            echo '</div>';
+        }
+        // Promise / payoff coverage (self-help)
+        if (!empty($dgFlags['promises'])) {
+            $tl = threads_label($book['profile'] ?? 'fiction');
+            echo '<div class="diag-sec"><h2>'.e($tl['title']).' <span class="muted mono">'.count($D['promises']).' open</span></h2>';
+            if ($D['promises']) { echo '<p class="muted">Open promises with no confirmed payoff yet — resolve each when the book delivers it. <a href="'.url(['p'=>'threads','book'=>$book['id']]).'">Tracker →</a></p><ul class="diag-list">';
+                foreach ($D['promises'] as $t) echo '<li><span class="diag-kind">'.e($t['entry_name']).'</span><span class="diag-detail">'.inline_md($t['text']).'</span></li>';
+                echo '</ul>';
+            } else echo '<p class="muted">No open reader-promises.</p>';
+            echo '</div>';
+        }
+        break;
+    }
+    if (!$cid) {   // ---- fiction book-level summary ----
         $rows = get_book_diagnostics($book['id']);
         echo '<div class="pagehead"><div><h1>Diagnostics</h1><p class="desc">Lexical analysis per chapter. These are <strong>patterns to review</strong> — stylistic tells and repetition, <em>not</em> a judgment of provenance or quality. Click a chapter for detail.</p></div></div>';
         if (!$rows) { echo '<p class="empty">No chapters to analyze yet.</p>'; break; }
@@ -1177,7 +1402,33 @@ case 'diagnostics':
     if (!$data['usage']['overused'] && !$data['usage']['repeated_phrases']) echo '<p class="muted">No notable repetition.</p>';
     echo '</div>';
 
-    // Dialogue control
+    // Readability (Phase 14, non-fiction)
+    if (!empty($dgFlags['readability']) && !empty($data['readability']) && $data['readability']['grade'] !== null) {
+        $rd = $data['readability'];
+        echo '<div class="diag-sec"><h2>Readability</h2><div class="diag-chips">';
+        echo '<span class="diag-chip">FK grade <span class="muted mono">'.e((string)$rd['grade']).'</span></span>';
+        echo '<span class="diag-chip">Reading ease <span class="muted mono">'.e((string)$rd['ease']).'</span></span>';
+        echo '<span class="diag-chip">Words/sentence <span class="muted mono">'.e((string)$rd['wps']).'</span></span>';
+        echo '<span class="diag-chip">Long sentences (&gt;30w) <span class="muted mono">'.(int)$rd['long_sentences'].'</span></span>';
+        echo '</div>';
+        if ($rd['grade'] > 14) echo '<p class="muted">Grade '.e((string)$rd['grade']).' reads dense — consider shorter sentences and plainer words for a general audience.</p>';
+        echo '</div>';
+    }
+
+    // Citation coverage (Phase 14, non-fiction)
+    if (!empty($dgFlags['citations']) && isset($data['citations'])) {
+        $cv = $data['citations'];
+        echo '<div class="diag-sec"><h2>Citation coverage</h2>';
+        echo '<p class="muted">'.(int)$cv['claims'].' claim-like sentence(s) · '.(int)$cv['supported'].' cited · <strong>'.(int)$cv['unsupported'].'</strong> to source.</p>';
+        if (!empty($cv['examples'])) { echo '<ul class="diag-list">';
+            foreach ($cv['examples'] as $ex) echo '<li><span class="diag-detail">'.e(mb_strimwidth($ex, 0, 180, '…')).'</span></li>';
+            echo '</ul>';
+        }
+        echo '</div>';
+    }
+
+    // Dialogue control (fiction only)
+    if (!empty($dgFlags['dialogue'])) {
     $dl = $data['dialogue'];
     echo '<div class="diag-sec"><h2>Dialogue control</h2>';
     echo '<p class="muted">'.(int)$dl['quotes'].' quoted span(s)'.(!empty($dl['tagged'])?', '.(int)$dl['tagged'].' attributed':'').'.</p>';
@@ -1195,11 +1446,13 @@ case 'diagnostics':
     }
     if (!$dl['bookisms'] && empty($dl['adverb_examples'])) echo '<p class="muted">No attribution flags.</p>';
     echo '</div>';
+    }
     break;
 
 case 'threads':
     $open = get_threads($book['id'], 'open'); $res = get_threads($book['id'], 'resolved');
-    echo '<div class="pagehead"><div><h1>Open threads</h1><p class="desc">'.count($open).' open · '.count($res).' resolved. Threads are pulled from each entry’s “Open Threads” section.</p></div></div>';
+    $tl = threads_label($book['profile'] ?? 'fiction');
+    echo '<div class="pagehead"><div><h1>'.e($tl['title']).'</h1><p class="desc">'.count($open).' open · '.count($res).' resolved. '.e($tl['desc']).' Pulled from each entry’s “Open Threads” section.</p></div></div>';
     echo '<table class="grid"><tr><th>Entry</th><th>Thread</th><th></th></tr>';
     foreach ($open as $t) {
         echo '<tr><td><a href="'.url(['p'=>'entry','book'=>$book['id'],'db'=>$t['db_key'],'slug'=>$t['entry_slug']]).'">'.e($t['entry_name']).'</a></td><td>'.inline_md($t['text']).'</td>';
@@ -1229,7 +1482,8 @@ case 'tasks':
     foreach (['high'=>'High','med'=>'Medium','low'=>'Low'] as $k=>$lab) echo '<option value="'.$k.'"'.($k==='med'?' selected':'').'>'.$lab.'</option>';
     echo '</select></div>';
     echo '<div><label class="f">Target database (optional)</label><select name="target_db"><option value="">—</option>';
-    foreach (DB_KEYS as $k) echo '<option value="'.$k.'">'.DBMETA[$k]['title'].'</option>';
+    $tprofile = $book['profile'] ?? 'fiction';
+    foreach (db_keys_for($tprofile) as $k) echo '<option value="'.$k.'">'.e(dbmeta($k,$tprofile)['title']).'</option>';
     echo '</select></div><div><label class="f">Target slug (optional)</label><input type="text" name="target_slug" placeholder="kebab-case"></div>';
     echo '</div>';
     echo '<label class="f" style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="for_claude" value="1" style="width:auto" checked> Flag for Claude</label>';

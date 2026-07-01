@@ -52,7 +52,7 @@ function migrate() {
 "books" => "(
   id VARCHAR(40) NOT NULL PRIMARY KEY, folder VARCHAR(120) NOT NULL, title VARCHAR(255) NOT NULL,
   series VARCHAR(160) DEFAULT '', num VARCHAR(10) DEFAULT '', status VARCHAR(20) DEFAULT 'planning',
-  logline TEXT, genre VARCHAR(255) DEFAULT '', word_target VARCHAR(20) DEFAULT '',
+  profile VARCHAR(20) DEFAULT 'fiction', logline TEXT, genre VARCHAR(255) DEFAULT '', word_target VARCHAR(20) DEFAULT '',
   dot VARCHAR(10) DEFAULT '#4A4391', sort_order INT DEFAULT 0, updated_at $now )",
 "entries" => "(
   id $pk, book_id VARCHAR(40) NOT NULL, db_key VARCHAR(20) NOT NULL, slug VARCHAR(160) NOT NULL,
@@ -87,6 +87,18 @@ function migrate() {
 "canvas_cards" => "( id $pk, book_id VARCHAR(40) NOT NULL, x INT DEFAULT 40, y INT DEFAULT 40, text TEXT, color VARCHAR(10) DEFAULT '#7c8cff', updated_at $now )",
 "canvas_links" => "( id $pk, book_id VARCHAR(40) NOT NULL, from_id INT NOT NULL, to_id INT NOT NULL )",
 "vision_items" => "( id $pk, book_id VARCHAR(40) NOT NULL, caption VARCHAR(255) DEFAULT '', image_url TEXT, sort_order INT DEFAULT 0, created_at $now )",
+"sources" => "(
+  id $pk, book_id VARCHAR(40) NOT NULL, cite_key VARCHAR(160) NOT NULL, type VARCHAR(20) DEFAULT 'web',
+  author VARCHAR(255) DEFAULT '', title VARCHAR(500) DEFAULT '', year VARCHAR(20) DEFAULT '',
+  publisher VARCHAR(255) DEFAULT '', url TEXT, accessed VARCHAR(40) DEFAULT '', locator VARCHAR(160) DEFAULT '',
+  note TEXT, sort_order INT DEFAULT 0, updated_at $now )",
+"claim_sources" => "(
+  id $pk, book_id VARCHAR(40) NOT NULL, chapter_file VARCHAR(255) NOT NULL, source_id INT DEFAULT NULL,
+  cite_key VARCHAR(160) NOT NULL, hits INT DEFAULT 1, created_at $now )",
+"exercises" => "(
+  id $pk, book_id VARCHAR(40) NOT NULL, chapter_id INT NOT NULL, ordinal INT DEFAULT 1,
+  title VARCHAR(255) DEFAULT '', type VARCHAR(40) DEFAULT '', est_time VARCHAR(60) DEFAULT '',
+  operationalizes VARCHAR(160) DEFAULT '', prompt MEDIUMTEXT, updated_at $now )",
     ];
     foreach ($tables as $name => $cols) {
         db()->exec("CREATE TABLE IF NOT EXISTS $name $cols");
@@ -97,6 +109,7 @@ function migrate() {
         "ALTER TABLE chapters ADD COLUMN body MEDIUMTEXT",
         "ALTER TABLE tasks ADD COLUMN priority VARCHAR(10) DEFAULT 'med'",
         "ALTER TABLE tasks ADD COLUMN due VARCHAR(20) DEFAULT 'someday'",
+        "ALTER TABLE books ADD COLUMN profile VARCHAR(20) DEFAULT 'fiction'",   // Phase 10 book profiles
     ] as $s) {
         try { db()->exec($s); } catch (Exception $e) {}
     }
@@ -111,6 +124,11 @@ function migrate() {
         "CREATE UNIQUE INDEX uniq_kv ON sync_state (book_id, k)",
         "CREATE INDEX k_chnote ON chapter_notes (book_id, chapter_file)",
         "CREATE UNIQUE INDEX uniq_note ON note_pages (book_id, slug)",
+        "CREATE UNIQUE INDEX uniq_source ON sources (book_id, cite_key)",
+        "CREATE INDEX k_claim_book_file ON claim_sources (book_id, chapter_file)",
+        "CREATE INDEX k_claim_src ON claim_sources (source_id)",
+        "CREATE INDEX k_ex_ch ON exercises (chapter_id)",
+        "CREATE INDEX k_ex_book ON exercises (book_id)",
     ];
     foreach ($idx as $s) { try { db()->exec($s); } catch (Exception $e) {} }
 }
