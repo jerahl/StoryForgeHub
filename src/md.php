@@ -19,6 +19,17 @@ const SCENE_LABELS = ['Draft 1','Needs revision','Final','Alt version','Note'];
 const SCENE_LABELS_EXCLUDED = ['Alt version','Note'];
 function scene_label_excluded($label) { return in_array((string)$label, SCENE_LABELS_EXCLUDED, true); }
 
+/** Resolve database meta for any db_key. Prefers the profile-aware resolver
+ *  (profiles.php, Phase 10/11) when loaded so non-fiction keys resolve; falls
+ *  back to the fiction DBMETA const, then a generic default, so md.php stays
+ *  usable standalone and never warns on an unknown key. */
+function md_dbmeta($db) {
+    if (function_exists('dbmeta')) return dbmeta($db);
+    if (isset(DBMETA[$db])) return DBMETA[$db];
+    $t = ucfirst((string)$db);
+    return ['title'=>$t, 'singular'=>rtrim($t, 's') ?: $t, 'detailLabel'=>'Detail'];
+}
+
 function md_find_links($s) {
     preg_match_all('/\[\[([^\]]+)\]\]/', $s, $m);
     return $m[1];
@@ -59,7 +70,7 @@ function md_parse_entry($raw, $db, $fallback_slug = '') {
     }
     if (!$slug) $slug = $fallback_slug;
 
-    $detail_label = DBMETA[$db]['detailLabel'];
+    $detail_label = md_dbmeta($db)['detailLabel'];
     $detail = ''; $first_app = '';
     foreach ($fields as $f) {
         if (strtolower($f['label']) === strtolower($detail_label)) $detail = $f['value'];
@@ -91,7 +102,7 @@ function md_parse_entry($raw, $db, $fallback_slug = '') {
 
     return [
         'slug'=>$slug, 'name'=>$name, 'db'=>$db,
-        'status'=>$status ?: 'seed', 'type'=>$type ?: DBMETA[$db]['singular'],
+        'status'=>$status ?: 'seed', 'type'=>$type ?: md_dbmeta($db)['singular'],
         'detail'=>$detail, 'detailLabel'=>$detail_label, 'firstApp'=>$first_app,
         'fields'=>$fields, 'related'=>$related, 'relatedRaw'=>$related_raw,
         'sections'=>$sec_out, 'threads'=>$threads, 'sources'=>$sources,
@@ -103,7 +114,7 @@ function md_render_entry($e) {
     $out = ['# ' . $e['name'], ''];
     $out[] = '- **Slug:** ' . $e['slug'];
     $out[] = '- **Status:** ' . ($e['status'] ?? 'seed');
-    $out[] = '- **Type:** ' . ($e['type'] ?? DBMETA[$e['db']]['singular']);
+    $out[] = '- **Type:** ' . ($e['type'] ?? md_dbmeta($e['db'])['singular']);
     foreach (($e['fields'] ?? []) as $f) $out[] = '- **' . $f['label'] . ':** ' . $f['value'];
 
     $related = $e['related'] ?? [];

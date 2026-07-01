@@ -45,9 +45,10 @@ if (isset($opts['json'])) {
         $dir = "$root/{$b['folder']}";
         if (!is_dir($dir)) { echo "  (skip missing {$b['folder']})\n"; continue; }
         $files = [];
-        foreach (DB_KEYS as $k) {
-            foreach (glob("$dir/Codex/" . DBMETA[$k]['folder'] . "/*.md") as $p)
-                $files['Codex/' . DBMETA[$k]['folder'] . '/' . basename($p)] = file_get_contents($p);
+        // Scan every profile's Codex folders (Phase 11), not just fiction's.
+        foreach (folder_db_map() as $folder => $k) {
+            foreach (glob("$dir/Codex/" . $folder . "/*.md") as $p)
+                $files['Codex/' . $folder . '/' . basename($p)] = file_get_contents($p);
         }
         foreach (glob("$dir/Manuscript/*.md") as $p) $files['Manuscript/' . basename($p)] = file_get_contents($p);
         foreach (glob("$dir/Codex/Meta/*.md") as $p) $files['Codex/Meta/' . basename($p)] = file_get_contents($p);

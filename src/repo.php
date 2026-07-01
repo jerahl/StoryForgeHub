@@ -783,9 +783,10 @@ function import_snapshot($snap) {
 /** payload: { books: [ {folder, files:{relpath: content}} ] }  (folder -> web) */
 function push_files($payload) {
     $report = ['entries'=>0,'chapters'=>0,'meta'=>0,'notes'=>0,'progressions'=>0,'archived'=>0,'skipped'=>0,'created'=>[],'books'=>[]];
-    $folder_re = '#^Codex/(' . implode('|', array_map(function($k){return DBMETA[$k]['folder'];}, DB_KEYS)) . ')/(.+)\.md$#';
-    $db_by_folder = [];
-    foreach (DB_KEYS as $k) $db_by_folder[DBMETA[$k]['folder']] = $k;
+    // Recognize every profile's Codex folders (Phase 11), not just fiction's, so a
+    // non-fiction book's Codex/Concepts/*.md round-trips through the same parser.
+    $db_by_folder = folder_db_map();
+    $folder_re = '#^Codex/(' . implode('|', array_map(function($f){return preg_quote($f, '#');}, array_keys($db_by_folder))) . ')/(.+)\.md$#';
 
     migrate(); // ensure tables exist (lets a fresh DB accept the first push)
 

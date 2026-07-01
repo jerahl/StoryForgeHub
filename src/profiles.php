@@ -58,10 +58,12 @@ const PROFILES = [
             'methods'       => ['title'=>'Methods','singular'=>'Method','letter'=>'M','hue'=>'#4F7A52','folder'=>'Methods','detailLabel'=>'Class','desc'=>'Named tools, models, and processes — the diagnostics and steps the book teaches.'],
         ],
         'fieldTemplates' => [
-            'concepts'      => ['Definition','Why it matters','Common misconception','Related concepts'],
+            // Concepts are the spine: a definition, the claim they support, and
+            // examples — [[links]] to the chapters that develop them go in Related.
+            'concepts'      => ['Definition','Claim it supports','Examples'],
             'people'        => ['Affiliation','Known for','Quote','Permission status'],
             'sources'       => ['Author','Title','Year','Publisher','URL'],
-            'organizations' => ['Kind','Founded','Known for'],
+            'organizations' => ['Kind','Movement','Notable figures'],
             'methods'       => ['Purpose','Steps','When to use'],
         ],
         'bands' => ['actSingular'=>'Part', 'actPlural'=>'Parts', 'sceneSingular'=>'Section', 'scenePlural'=>'Sections'],
@@ -82,7 +84,7 @@ const PROFILES = [
             'exercises'     => ['title'=>'Exercises','singular'=>'Exercise','letter'=>'E','hue'=>'#C9933A','folder'=>'Exercises','detailLabel'=>'Type','desc'=>'Reflections, worksheets, and practices that operationalize a concept.'],
         ],
         'fieldTemplates' => [
-            'concepts'  => ['Definition','Why it matters','The promise it pays off','Related concepts'],
+            'concepts'  => ['Definition','The promise it pays off','Examples'],
             'methods'   => ['Purpose','Steps','When to use'],
             'people'    => ['Affiliation','Known for','Quote','Permission status'],
             'sources'   => ['Author','Title','Year','Publisher','URL'],
@@ -165,6 +167,21 @@ function dbmeta($key, $profile = null) {
     $title = ucfirst($key);
     return ['title'=>$title, 'singular'=>rtrim($title, 's') ?: $title, 'letter'=>strtoupper($key[0] ?? '?'),
             'hue'=>'#7A715F', 'folder'=>$title, 'detailLabel'=>'Detail', 'desc'=>''];
+}
+
+/** Codex folder name => db_key across every profile (Phase 11). Lets the folder
+ *  sync recognize `Codex/Concepts/*.md`, `Codex/People/*.md`, etc. — not just the
+ *  fiction folders. Folder names are unique per key, so there are no collisions;
+ *  the fiction base wins if one ever appeared twice. */
+function folder_db_map() {
+    static $m = null;
+    if ($m !== null) return $m;
+    $m = [];
+    foreach (all_dbmeta() as $k => $meta) {
+        $f = $meta['folder'] ?? '';
+        if ($f !== '' && !isset($m[$f])) $m[$f] = $k;
+    }
+    return $m;
 }
 
 /** Default entry-field labels prefilled when starting a new entry. Fiction => []. */
