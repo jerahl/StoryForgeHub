@@ -1254,9 +1254,160 @@ function diag_dialogue($text, $ctx = []) {
     return ['quotes'=>$quotes, 'bookisms'=>$bk, 'tagged'=>$tagged, 'tags_per_speaker'=>$tps, 'adverb_examples'=>array_keys($advEx)];
 }
 
+/* ---- Non-fiction analyzers (Phase 14): a different battery on the P7 machinery.
+ * Findings stay "patterns to review," never auto-applied. */
+
+/** Rough syllable estimate (vowel groups, drop trailing silent e). */
+function diag_syllables($word) {
+    $w = preg_replace('/[^a-z]/', '', strtolower((string)$word));
+    if ($w === '') return 0;
+    $w = preg_replace('/e$/', '', $w);
+    preg_match_all('/[aeiouy]+/', $w, $m);
+    return max(1, count($m[0]));
+}
+
+/** Readability: Flesch-Kincaid grade + reading ease + sentence-length spread. */
+function diag_readability($text) {
+    $sentences = diag_sentences($text);
+    $words = diag_words($text);
+    $ns = count($sentences); $nw = count($words);
+    if ($ns === 0 || $nw === 0) return ['grade'=>null,'ease'=>null,'wps'=>0,'words'=>$nw,'sentences'=>$ns,'long_sentences'=>0];
+    $syl = 0; foreach ($words as $w) $syl += diag_syllables($w);
+    $wps = $nw / $ns; $spw = $syl / $nw;
+    $grade = 0.39 * $wps + 11.8 * $spw - 15.59;
+    $ease  = 206.835 - 1.015 * $wps - 84.6 * $spw;
+    $long = 0; foreach ($sentences as $s) if (count(diag_words($s)) > 30) $long++;
+    return ['grade'=>round($grade,1), 'ease'=>round($ease,1), 'wps'=>round($wps,1), 'spw'=>round($spw,2),
+            'words'=>$nw, 'sentences'=>$ns, 'long_sentences'=>$long];
+}
+
+/** Citation coverage: claim-like sentences (statistics / evidence language) that
+ *  carry no [^cite:…] token in the same sentence — "claims to source." */
+function diag_citation_coverage($md) {
+    $text = diag_plain_text($md);   // leaves [^cite:key] tokens intact
+    $sentences = diag_sentences($text);
+    $claimRe = '/(\d[\d,.]*\s*(?:%|percent|million|billion|trillion|thousand|people|users|patients|cases|times|percentage)'
+             . '|\b(?:studies|study|research|researchers|data|survey|surveys|evidence|scientists?|experts?|statistics?|according to|shows? that|found that|proven|proves)\b)/i';
+    $unsupported = []; $supported = 0; $total = 0;
+    foreach ($sentences as $s) {
+        if (!preg_match($claimRe, $s)) continue;
+        $total++;
+        if (strpos($s, '[^cite:') !== false) { $supported++; continue; }
+        if (count($unsupported) < 8) $unsupported[] = trim(preg_replace('/\s+/', ' ', $s));
+    }
+    return ['claims'=>$total, 'supported'=>$supported, 'unsupported'=>$total - $supported, 'examples'=>$unsupported];
+}
+
+/** Cross-chapter repetition: contentful 5/6-word windows appearing in >=2 live
+ *  chapters (a point restated across the book). Book-level. */
+function diag_cross_repetition($book_id) {
+    $stop = diag_stopwords();
+    $gramChapters = [];   // gram => [chapterLabel => true]
+    $chs = all("SELECT num,title,file,body FROM chapters WHERE book_id=? AND status<>'archived' AND LOWER(file) NOT LIKE '%readme.md' ORDER BY (num+0), num, file", [$book_id]);
+    foreach ($chs as $c) {
+        $label = 'Ch ' . ($c['num'] !== '' ? $c['num'] : $c['file']);
+        $ws = diag_words(diag_plain_text($c['body'])); $n = count($ws);
+        $size = 6; $seen = [];
+        for ($i = 0; $i + $size <= $n; $i++) {
+            $gram = array_slice($ws, $i, $size);
+            if (isset($stop[$gram[0]]) || isset($stop[$gram[$size-1]])) continue;   // don't start/end on a stopword
+            $content = 0; foreach ($gram as $g) if (!isset($stop[$g])) $content++;
+            if ($content < 3) continue;                                             // must carry real content
+            $key = implode(' ', $gram);
+            if (isset($seen[$key])) continue; $seen[$key] = true;                   // once per chapter
+            $gramChapters[$key][$label] = true;
+        }
+    }
+    $out = [];
+    foreach ($gramChapters as $gram => $chapters) {
+        if (count($chapters) < 2) continue;
+        $out[] = ['phrase'=>$gram, 'chapters'=>array_keys($chapters), 'count'=>count($chapters)];
+    }
+    usort($out, function($a, $b) { return $a['count'] !== $b['count'] ? $b['count'] - $a['count'] : strlen($b['phrase']) - strlen($a['phrase']); });
+    // Collapse sliding-window duplicates: 6-grams from one repeated sentence share
+    // contiguous 4-word runs — keep the first, drop any that overlaps a kept one.
+    $runsOf = function($phrase) {
+        $w = explode(' ', $phrase); $r = [];
+        for ($i = 0; $i + 4 <= count($w); $i++) $r[] = implode(' ', array_slice($w, $i, 4));
+        return $r;
+    };
+    $kept = []; $covered = [];
+    foreach ($out as $r) {
+        $runs = $runsOf($r['phrase']); $overlap = false;
+        foreach ($runs as $run) if (isset($covered[$run])) { $overlap = true; break; }
+        if ($overlap) continue;
+        foreach ($runs as $run) $covered[$run] = true;
+        $kept[] = $r;
+    }
+    return array_slice($kept, 0, 20);
+}
+
+/** Jargon / undefined terms: Concept entries referenced in the book that carry no
+ *  definition yet. Leans on the P11 concept template + P5 mention index. */
+function diag_undefined_terms($book_id) {
+    $out = [];
+    foreach (all("SELECT id,slug,name,status FROM entries WHERE book_id=? AND db_key='concepts' ORDER BY name", [$book_id]) as $e) {
+        $hasDef = (int) val("SELECT COUNT(*) FROM entry_fields WHERE entry_id=? AND LOWER(label)='definition' AND TRIM(COALESCE(value,''))<>''", [$e['id']]);
+        if (!$hasDef) $hasDef = (int) val("SELECT COUNT(*) FROM entry_sections WHERE entry_id=? AND TRIM(COALESCE(body,''))<>''", [$e['id']]);
+        if ($hasDef) continue;
+        $apps = get_appearances($book_id, $e['slug']);
+        $chapterMentions = 0; foreach ($apps as $a) if ($a['src_type'] === 'chapter') $chapterMentions += (int)$a['total'];
+        if ($chapterMentions > 0)
+            $out[] = ['slug'=>$e['slug'], 'name'=>$e['name'], 'mentions'=>$chapterMentions, 'status'=>$e['status']];
+    }
+    usort($out, function($a, $b) { return $b['mentions'] - $a['mentions']; });
+    return $out;
+}
+
+/** Promise/payoff coverage: open reader-promises (threads) with no payoff yet. */
+function nonfiction_promise_coverage($book_id) {
+    return get_threads($book_id, 'open');
+}
+
+/** Book-level non-fiction diagnostics assembly (profile selects which run). */
+function get_nonfiction_diagnostics($book_id) {
+    $diag = diagnostics_for(book_profile($book_id));
+    // undefined-term detection reads the P5 mention index; refresh it so the
+    // diagnostic is accurate on view (books are small; bounded work).
+    if (!empty($diag['jargon']) && function_exists('index_mentions')) index_mentions($book_id);
+    $chapters = [];
+    foreach (get_chapters($book_id) as $ch) {
+        if (preg_match('/readme\.md$/i', (string)$ch['file'])) continue;
+        $d = get_chapter_diagnostics($book_id, $ch['id']); if (!$d) continue;
+        $data = $d['data'];
+        $chapters[] = [
+            'chapter'     => $ch,
+            'words'       => $data['words'] ?? 0,
+            'readability' => $data['readability'] ?? null,
+            'citations'   => $data['citations'] ?? null,
+            'patterns'    => count($data['patterns'] ?? []),
+        ];
+    }
+    return [
+        'diag'       => $diag,
+        'chapters'   => $chapters,
+        'repetition' => !empty($diag['repetition']) ? diag_cross_repetition($book_id) : [],
+        'undefined'  => !empty($diag['jargon']) ? diag_undefined_terms($book_id) : [],
+        'orphans'    => !empty($diag['citations']) ? get_orphan_citations($book_id) : [],
+        'promises'   => !empty($diag['promises']) ? nonfiction_promise_coverage($book_id) : [],
+    ];
+}
+
 function analyze_prose($md, $ctx = []) {
     $text = diag_plain_text($md);
-    return ['words'=>count(diag_words($text)), 'usage'=>diag_usage_frequency($text), 'patterns'=>diag_patterns($text, $ctx), 'dialogue'=>diag_dialogue($text, $ctx)];
+    $diag = $ctx['diag'] ?? ['usage'=>true,'patterns'=>true,'dialogue'=>true,'readability'=>false,'citations'=>false];
+    $out = [
+        'words'    => count(diag_words($text)),
+        'usage'    => diag_usage_frequency($text),
+        'patterns' => diag_patterns($text, $ctx),
+        // dialogue is disabled for non-fiction; keep the key present (empty) so the
+        // chapter Smart-editing panel's shape stays stable.
+        'dialogue' => !empty($diag['dialogue']) ? diag_dialogue($text, $ctx)
+                        : ['quotes'=>0,'bookisms'=>[],'tagged'=>0,'tags_per_speaker'=>[],'adverb_examples'=>[]],
+    ];
+    if (!empty($diag['readability'])) $out['readability'] = diag_readability($text);
+    if (!empty($diag['citations']))   $out['citations']   = diag_citation_coverage($md);
+    return $out;
 }
 
 /** Book-wide em-dash baseline (per 1k words), a cheap scan cached per request. */
@@ -1297,13 +1448,15 @@ function get_chapter_diagnostics($book_id, $chapter_id) {
     ensure_prose_analysis();
     $c = one("SELECT id,book_id,num,title,file,body FROM chapters WHERE id=? AND book_id=?", [$chapter_id, $book_id]);
     if (!$c) return null;
-    $hash = md5('v2|'.(string)$c['body']);   // bump tag when analyzer output shape changes (forces recompute)
+    $profile = book_profile($book_id);
+    $diag = diagnostics_for($profile);
+    $hash = md5('v3|'.$profile.'|'.(string)$c['body']);   // include profile: bumps when the battery changes
     $row = one("SELECT body_hash,data FROM prose_analysis WHERE chapter_id=?", [$chapter_id]);
     if ($row && $row['body_hash'] === $hash) {
         $data = json_decode($row['data'], true);
         if (is_array($data)) return ['chapter'=>$c, 'data'=>$data, 'cached'=>true];
     }
-    $ctx = ['em_baseline'=>book_em_baseline($book_id), 'speakers'=>book_speakers($book_id)];
+    $ctx = ['em_baseline'=>book_em_baseline($book_id), 'speakers'=>book_speakers($book_id), 'profile'=>$profile, 'diag'=>$diag];
     $data = analyze_prose($c['body'], $ctx);
     q("DELETE FROM prose_analysis WHERE chapter_id=?", [$chapter_id]);
     q("INSERT INTO prose_analysis (book_id,chapter_id,body_hash,data) VALUES (?,?,?,?)", [$book_id, $chapter_id, $hash, json_encode($data)]);

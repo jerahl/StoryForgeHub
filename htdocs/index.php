@@ -1304,7 +1304,61 @@ case 'timeline':
 
 case 'diagnostics':
     $cid = (int)($_GET['id'] ?? 0);
-    if (!$cid) {   // ---- book-level summary ----
+    $dgFlags = diagnostics_for($book['profile'] ?? 'fiction');
+    $nfDiag = !empty($dgFlags['readability']) || !empty($dgFlags['citations']) || !empty($dgFlags['jargon']) || !empty($dgFlags['repetition']);
+    if (!$cid && $nfDiag) {   // ---- non-fiction book-level battery (Phase 14) ----
+        $D = get_nonfiction_diagnostics($book['id']);
+        echo '<div class="pagehead"><div><h1>Diagnostics</h1><p class="desc">Non-fiction battery — citation coverage, readability, cross-chapter repetition, undefined terms'.(!empty($dgFlags['promises'])?', reader promises':'').'. These are <strong>patterns to review</strong>, never auto-applied. Click a chapter for detail.</p></div></div>';
+        if (!$D['chapters']) { echo '<p class="empty">No chapters to analyze yet.</p>'; break; }
+        echo '<table class="grid"><tr><th>Chapter</th><th>Words</th><th>Readability (FK grade)</th><th>Claims to source</th><th>Patterns</th></tr>';
+        foreach ($D['chapters'] as $r) {
+            $ch = $r['chapter']; $label = trim('Ch. '.$ch['num'].' '.($ch['title'] ? '— '.$ch['title'] : ''));
+            $grade = $r['readability']['grade'] ?? null;
+            $uns = $r['citations']['unsupported'] ?? 0;
+            echo '<tr><td><a href="'.url(['p'=>'diagnostics','book'=>$book['id'],'id'=>$ch['id']]).'">'.e($label).'</a></td>'
+               . '<td class="mono">'.number_format((int)$r['words']).'</td>'
+               . '<td class="mono">'.($grade===null?'—':e((string)$grade).(($grade>14)?' <span class="diag-sev sev-med">dense</span>':'')).'</td>'
+               . '<td class="mono">'.((int)$uns ? '<strong>'.(int)$uns.'</strong>' : '0').'</td>'
+               . '<td class="mono">'.(int)$r['patterns'].'</td></tr>';
+        }
+        echo '</table>';
+        // Citation coverage (orphan cite keys, book-wide) — from P12
+        if (!empty($dgFlags['citations']) && $D['orphans']) {
+            echo '<div class="diag-sec"><h2>Claims to source <span class="muted mono">'.count($D['orphans']).'</span></h2><p class="muted">Cited in prose with no matching source. <a href="'.url(['p'=>'references','book'=>$book['id']]).'">References →</a></p><div class="diag-chips">';
+            foreach ($D['orphans'] as $o) echo '<span class="diag-chip"><code>'.e($o['cite_key']).'</code> <span class="muted mono">'.(int)$o['chapters'].' ch</span></span>';
+            echo '</div></div>';
+        }
+        // Cross-chapter repetition
+        if (!empty($dgFlags['repetition'])) {
+            echo '<div class="diag-sec"><h2>Cross-chapter repetition <span class="muted mono">'.count($D['repetition']).'</span></h2>';
+            if ($D['repetition']) { echo '<ul class="diag-list">';
+                foreach ($D['repetition'] as $r) echo '<li><span class="diag-detail">“'.e($r['phrase']).'”</span><span class="muted mono">'.implode(', ', array_map('htmlspecialchars', $r['chapters'])).'</span></li>';
+                echo '</ul>';
+            } else echo '<p class="muted">No phrases repeated across chapters.</p>';
+            echo '</div>';
+        }
+        // Undefined terms
+        if (!empty($dgFlags['jargon'])) {
+            echo '<div class="diag-sec"><h2>Undefined terms <span class="muted mono">'.count($D['undefined']).'</span></h2>';
+            if ($D['undefined']) { echo '<p class="muted">Concepts referenced in prose that still have no definition.</p><div class="diag-chips">';
+                foreach ($D['undefined'] as $u) echo '<a class="diag-chip" href="'.url(['p'=>'entry','book'=>$book['id'],'db'=>'concepts','slug'=>$u['slug']]).'">'.e($u['name']).' <span class="muted mono">×'.(int)$u['mentions'].'</span></a>';
+                echo '</div>';
+            } else echo '<p class="muted">Every referenced concept has a definition.</p>';
+            echo '</div>';
+        }
+        // Promise / payoff coverage (self-help)
+        if (!empty($dgFlags['promises'])) {
+            $tl = threads_label($book['profile'] ?? 'fiction');
+            echo '<div class="diag-sec"><h2>'.e($tl['title']).' <span class="muted mono">'.count($D['promises']).' open</span></h2>';
+            if ($D['promises']) { echo '<p class="muted">Open promises with no confirmed payoff yet — resolve each when the book delivers it. <a href="'.url(['p'=>'threads','book'=>$book['id']]).'">Tracker →</a></p><ul class="diag-list">';
+                foreach ($D['promises'] as $t) echo '<li><span class="diag-kind">'.e($t['entry_name']).'</span><span class="diag-detail">'.inline_md($t['text']).'</span></li>';
+                echo '</ul>';
+            } else echo '<p class="muted">No open reader-promises.</p>';
+            echo '</div>';
+        }
+        break;
+    }
+    if (!$cid) {   // ---- fiction book-level summary ----
         $rows = get_book_diagnostics($book['id']);
         echo '<div class="pagehead"><div><h1>Diagnostics</h1><p class="desc">Lexical analysis per chapter. These are <strong>patterns to review</strong> — stylistic tells and repetition, <em>not</em> a judgment of provenance or quality. Click a chapter for detail.</p></div></div>';
         if (!$rows) { echo '<p class="empty">No chapters to analyze yet.</p>'; break; }
@@ -1348,7 +1402,33 @@ case 'diagnostics':
     if (!$data['usage']['overused'] && !$data['usage']['repeated_phrases']) echo '<p class="muted">No notable repetition.</p>';
     echo '</div>';
 
-    // Dialogue control
+    // Readability (Phase 14, non-fiction)
+    if (!empty($dgFlags['readability']) && !empty($data['readability']) && $data['readability']['grade'] !== null) {
+        $rd = $data['readability'];
+        echo '<div class="diag-sec"><h2>Readability</h2><div class="diag-chips">';
+        echo '<span class="diag-chip">FK grade <span class="muted mono">'.e((string)$rd['grade']).'</span></span>';
+        echo '<span class="diag-chip">Reading ease <span class="muted mono">'.e((string)$rd['ease']).'</span></span>';
+        echo '<span class="diag-chip">Words/sentence <span class="muted mono">'.e((string)$rd['wps']).'</span></span>';
+        echo '<span class="diag-chip">Long sentences (&gt;30w) <span class="muted mono">'.(int)$rd['long_sentences'].'</span></span>';
+        echo '</div>';
+        if ($rd['grade'] > 14) echo '<p class="muted">Grade '.e((string)$rd['grade']).' reads dense — consider shorter sentences and plainer words for a general audience.</p>';
+        echo '</div>';
+    }
+
+    // Citation coverage (Phase 14, non-fiction)
+    if (!empty($dgFlags['citations']) && isset($data['citations'])) {
+        $cv = $data['citations'];
+        echo '<div class="diag-sec"><h2>Citation coverage</h2>';
+        echo '<p class="muted">'.(int)$cv['claims'].' claim-like sentence(s) · '.(int)$cv['supported'].' cited · <strong>'.(int)$cv['unsupported'].'</strong> to source.</p>';
+        if (!empty($cv['examples'])) { echo '<ul class="diag-list">';
+            foreach ($cv['examples'] as $ex) echo '<li><span class="diag-detail">'.e(mb_strimwidth($ex, 0, 180, '…')).'</span></li>';
+            echo '</ul>';
+        }
+        echo '</div>';
+    }
+
+    // Dialogue control (fiction only)
+    if (!empty($dgFlags['dialogue'])) {
     $dl = $data['dialogue'];
     echo '<div class="diag-sec"><h2>Dialogue control</h2>';
     echo '<p class="muted">'.(int)$dl['quotes'].' quoted span(s)'.(!empty($dl['tagged'])?', '.(int)$dl['tagged'].' attributed':'').'.</p>';
@@ -1366,6 +1446,7 @@ case 'diagnostics':
     }
     if (!$dl['bookisms'] && empty($dl['adverb_examples'])) echo '<p class="muted">No attribution flags.</p>';
     echo '</div>';
+    }
     break;
 
 case 'threads':
