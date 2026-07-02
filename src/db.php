@@ -99,6 +99,13 @@ function migrate() {
   id $pk, book_id VARCHAR(40) NOT NULL, chapter_id INT NOT NULL, ordinal INT DEFAULT 1,
   title VARCHAR(255) DEFAULT '', type VARCHAR(40) DEFAULT '', est_time VARCHAR(60) DEFAULT '',
   operationalizes VARCHAR(160) DEFAULT '', prompt MEDIUMTEXT, updated_at $now )",
+"dictionary_terms" => "(
+  id $pk, book_id VARCHAR(40) NOT NULL, term VARCHAR(190) NOT NULL,
+  source VARCHAR(10) DEFAULT 'user', created_at $now )",                    // Phase 15 custom spell-check dictionary
+"chapter_revisions" => "(
+  id $pk, book_id VARCHAR(40) NOT NULL, chapter_id INT NOT NULL, chapter_file VARCHAR(255) DEFAULT '',
+  body MEDIUMTEXT, body_hash VARCHAR(40) DEFAULT '', word_count INT DEFAULT 0,
+  kind VARCHAR(10) DEFAULT 'save', created_at $now )",                       // Phase 15 autosave draft + save snapshots
     ];
     foreach ($tables as $name => $cols) {
         db()->exec("CREATE TABLE IF NOT EXISTS $name $cols");
@@ -129,6 +136,8 @@ function migrate() {
         "CREATE INDEX k_claim_src ON claim_sources (source_id)",
         "CREATE INDEX k_ex_ch ON exercises (chapter_id)",
         "CREATE INDEX k_ex_book ON exercises (book_id)",
+        "CREATE UNIQUE INDEX uniq_dict ON dictionary_terms (book_id, term)",
+        "CREATE INDEX k_rev_ch ON chapter_revisions (book_id, chapter_id)",
     ];
     foreach ($idx as $s) { try { db()->exec($s); } catch (Exception $e) {} }
 }

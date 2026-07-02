@@ -153,6 +153,13 @@ function md_word_count($text) {
     return count($m[0]);
 }
 
+/** Canonicalise chapter body bytes exactly as write_chapter_file / the sync engine
+ *  do (CRLF→LF, strip NULs) so a hash is stable across editors and platforms.
+ *  Phase 15 autosave and revision snapshots hash through this so the never-clobber
+ *  base check matches the P9 save path byte-for-byte. */
+function md_body_norm($s) { return str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], (string)$s); }
+function md_body_hash($s) { return md5(md_body_norm($s)); }
+
 /** Pull HTML comments (<!-- ... -->) out of a chunk of markdown. Returns
  *  [prose_without_comments, [comment_text, ...]]. Multi-line safe. These author
  *  notes (e.g. "DRAFT (Ch.1) ... APPROVED by Stephen") are editorial metadata,

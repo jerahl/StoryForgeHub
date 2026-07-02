@@ -182,6 +182,46 @@ if ($method === 'POST') {
             redirect(['p'=>'chapter_edit','book'=>$book,'id'=>$_POST['cid']]);
         redirect(['p'=>'chapter','book'=>$book,'id'=>$_POST['cid']]);
     }
+    if ($a === 'chapter_autosave') {   // Phase 15: debounced draft autosave (JSON; never touches the canonical .md)
+        header('Content-Type: application/json; charset=utf-8');
+        $cid = (int)($_POST['cid'] ?? 0);
+        $c = get_chapter($cid);
+        if (!$c || $c['book_id'] !== $book) { echo json_encode(['ok'=>false,'error'=>'not found']); exit; }
+        $md = (string)($_POST['md'] ?? '');
+        $base = (string)($_POST['base'] ?? '');
+        // Early warning: the DB body moved under the editor (a sync). We still keep the
+        // draft (never lose keystrokes) but flag it so the UI can warn before Save.
+        $conflict = ($base !== '' && $base !== md_body_hash($c['body']));
+        save_chapter_autosave_draft($book, $cid, $c['file'], $md);
+        echo json_encode(['ok'=>true, 'saved_at'=>date('c'), 'conflict'=>$conflict, 'words'=>md_word_count($md)]); exit;
+    }
+    if ($a === 'chapter_revision_get') {   // Phase 15: fetch one snapshot's body for "load into editor" (JSON)
+        header('Content-Type: application/json; charset=utf-8');
+        $rev = get_chapter_revision($book, (int)($_POST['id'] ?? 0));
+        if (!$rev) { echo json_encode(['ok'=>false,'error'=>'not found']); exit; }
+        echo json_encode(['ok'=>true, 'body'=>$rev['body'], 'created_at'=>$rev['created_at'], 'kind'=>$rev['kind']]); exit;
+    }
+    if ($a === 'chapter_revision_discard_draft') {   // Phase 15: drop the recovered autosave draft
+        discard_chapter_autosave($book, (int)($_POST['cid'] ?? 0));
+        flash('Recovered draft discarded.');
+        redirect(['p'=>'chapter_edit','book'=>$book,'id'=>$_POST['cid']]);
+    }
+    if ($a === 'dictionary_add') {   // Phase 15: add a term (AJAX from the editor, or form from the dictionary page)
+        $ok = add_dictionary_term($book, $_POST['term'] ?? '');
+        if (!empty($_POST['ajax'])) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['ok'=>$ok, 'term'=>trim((string)($_POST['term'] ?? ''))]); exit; }
+        flash($ok ? 'Added “'.trim((string)$_POST['term']).'” to the dictionary.' : 'Could not add that term (empty or already present).', $ok ? 'ok' : 'err');
+        redirect(['p'=>'dictionary','book'=>$book]);
+    }
+    if ($a === 'dictionary_remove') {
+        remove_dictionary_term($book, (int)($_POST['id'] ?? 0));
+        flash('Removed from dictionary.');
+        redirect(['p'=>'dictionary','book'=>$book]);
+    }
+    if ($a === 'dictionary_import_codex') {
+        $n = import_codex_dictionary_terms($book);
+        flash("Imported $n Codex name".($n === 1 ? '' : 's')." into the dictionary.");
+        redirect(['p'=>'dictionary','book'=>$book]);
+    }
     if ($a === 'book_profile') {
         set_book_profile($book, $_POST['profile'] ?? 'fiction');
         flash('Book profile set to “'.profile_label($_POST['profile'] ?? 'fiction').'”.');
@@ -367,7 +407,7 @@ $titles = ['overview'=>'Overview','library'=>'Library','book'=>$book['title']??'
            'manuscript'=>'Manuscript','chapter'=>'Chapter','chapter_edit'=>'Edit chapter','diagnostics'=>'Diagnostics','progressions'=>'Progressions','timeline'=>'Timeline',
            'threads'=>($book ? threads_label($book['profile'] ?? 'fiction')['title'] : 'Open threads'),
            'references'=>'References','exercises'=>'Exercises',
-           'tasks'=>'Tasks','log'=>'Writing log','meta'=>'Meta','notes'=>'Notes','sync'=>'Sync',
+           'tasks'=>'Tasks','log'=>'Writing log','meta'=>'Meta','notes'=>'Notes','sync'=>'Sync','dictionary'=>'Dictionary',
            'plot'=>'Plot board','vision'=>'Mood board'];
 layout_head($titles[$p] ?? 'Codex', $accent, $bodyType, $density, $mode);
 echo '<div class="app">';
@@ -782,7 +822,8 @@ case 'manuscript':
     echo '<div class="pagehead"><div><h1>Manuscript</h1><p class="desc">'.count($ch).' chapters · '.number_format($book['wordCount']).' words. Click a chapter to read it; set its status below. Prose is authored in your folders and synced in.</p></div></div>';
     echo '<div class="toolbar"><a class="btn sm'.($view==='list'?' primary':'').'" href="'.url(['p'=>'manuscript','book'=>$book['id']]).'">List</a>'
        . '<a class="btn sm'.($view==='grid'?' primary':'').'" href="'.url(['p'=>'manuscript','book'=>$book['id'],'view'=>'grid']).'">Grid</a>'
-       . '<form method="post" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="reindex_mentions"><input type="hidden" name="book" value="'.e($book['id']).'"><button class="btn sm" title="Rebuild the name/alias mention index for this book">Reindex mentions</button></form></div>';
+       . '<form method="post" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="reindex_mentions"><input type="hidden" name="book" value="'.e($book['id']).'"><button class="btn sm" title="Rebuild the name/alias mention index for this book">Reindex mentions</button></form>'
+       . '<a class="btn sm" style="margin-left:8px" href="'.url(['p'=>'dictionary','book'=>$book['id']]).'" title="Custom spell-check dictionary">Dictionary</a></div>';
 
     // ---- New chapter / Import chapter(s) (Markdown-canonical; gated on CODEX_BOOKS_DIR) ----
     if (books_dir_set()) {
@@ -1260,25 +1301,142 @@ case 'chapter_edit':
     $c = get_chapter($_GET['id']);
     if (!$c || $c['book_id'] !== $book['id']) { echo '<p class="empty">Chapter not found.</p>'; break; }
     if (!(cfg()['books_dir'] ?? '')) { echo '<p class="empty">Chapter editing is disabled on this server.</p>'; break; }
-    echo '<div class="pagehead"><div><h1>Edit · '.e($c['title']).'</h1><p class="desc">Edit the chapter prose (Markdown). Saving writes it back to <span class="mono">Manuscript/'.e($c['file']).'</span> and the database. A timestamped backup is kept in <span class="mono">Manuscript/_backups/</span>; if the file changed on disk since you opened it, the save is refused (no overwrite).</p></div></div>';
-    $cbase = md5(str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], (string)$c['body']));
+    echo '<div class="pagehead"><div><h1>Edit · '.e($c['title']).'</h1><p class="desc">Edit the chapter prose (Markdown). Saving writes it back to <span class="mono">Manuscript/'.e($c['file']).'</span> and the database. A timestamped backup is kept in <span class="mono">Manuscript/_backups/</span>; if the file changed on disk since you opened it, the save is refused (no overwrite). Keystrokes autosave to a recoverable draft; spell check uses your browser plus this book’s <a href="'.url(['p'=>'dictionary','book'=>$book['id']]).'">custom dictionary</a>.</p></div></div>';
+
+    echo <<<'CSS'
+<style>
+  .ed-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 8px}
+  .ed-bar .ed-sep{flex:0 0 1px;align-self:stretch;background:var(--line,#e4e0d8);margin:0 4px}
+  .ed-status{font-size:12px;color:var(--muted,#8a8378);margin-left:auto}
+  .ed-status.ok{color:#2E6E6E}.ed-status.busy{color:#8A6A3E}.ed-status.warn{color:#8A3F4B;font-weight:600}
+  .ed-wc{font-size:12px;color:var(--muted,#8a8378);font-family:var(--mono)}
+  .ed-find{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 8px;padding:8px;border:1px solid var(--line,#e4e0d8);border-radius:8px;background:var(--accent-soft,#f6f3ee)}
+  .ed-find input[type=text]{padding:5px 8px;border:1px solid var(--line,#d8d3c8);border-radius:6px;font-size:13px}
+  .ed-find .ed-case{font-size:12px;display:flex;align-items:center;gap:3px;color:var(--muted,#8a8378)}
+  .ed-find .ed-count{font-size:12px;font-family:var(--mono);color:var(--muted,#8a8378);min-width:42px;text-align:center}
+  .ed-style{margin:10px 0;border:1px solid var(--line,#e4e0d8);border-radius:8px;padding:10px 12px}
+  .ed-style-h{font-weight:600;font-size:13px;margin-bottom:6px}
+  .ed-style-row{display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid var(--line,#eee);padding:5px 2px;cursor:pointer;font-size:12.5px}
+  .ed-style-row:hover{background:var(--accent-soft,#f6f3ee)}
+  .ed-style-kind{font-weight:600;color:var(--accent)}
+  .ed-style-empty{font-size:12.5px;color:var(--muted,#8a8378)}
+  .rev-row{display:flex;gap:8px;align-items:center;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--line,#eee)}
+  .rev-at{font-size:12px;font-family:var(--mono)}.rev-w{font-size:11px}
+  .ed-notes{margin-top:6px}
+  .ed-note{border:1px solid var(--line,#e4e0d8);border-radius:7px;padding:7px 9px;margin:6px 0;font-size:12px}
+  .ed-note-q{font-style:italic;color:var(--ink,#2c2a26);margin-bottom:3px}
+  .ed-note-n{color:var(--muted,#6b6253)}
+  .md-toolbar{display:flex;gap:2px;align-items:center;flex-wrap:wrap;margin:0 0 6px;padding:4px;border:1px solid var(--line,#e4e0d8);border-radius:8px}
+  .md-toolbar button{min-width:30px;height:30px;padding:0 8px;border:0;border-radius:6px;background:none;cursor:pointer;
+    font:600 14px/1 var(--body-font);color:var(--ink,#2c2a26)}
+  .md-toolbar button:hover{background:var(--accent-soft,#f6f3ee)}
+  .md-toolbar .md-i{font-style:italic}.md-toolbar .md-u{text-decoration:underline}.md-toolbar .md-s{text-decoration:line-through}
+  .md-toolbar .md-code{font-family:var(--mono);font-size:12px}
+  .md-toolbar .md-div{width:1px;align-self:stretch;background:var(--line,#e4e0d8);margin:2px 4px}
+</style>
+CSS;
+
+    $cbase       = md_body_hash($c['body']);
+    $draftRow    = get_chapter_autosave_draft($book['id'], (int)$c['id']);
+    $recoverDraft = ($draftRow && $draftRow['body_hash'] !== $cbase) ? $draftRow : null;
+    $revs        = get_chapter_revisions($book['id'], (int)$c['id']);
+    $dictWords   = get_dictionary_words($book['id']);
+    $editNotes   = get_chapter_notes($book['id'], $c['file'], 'open');
+
+    if ($recoverDraft) {
+        echo '<div class="flash" id="draftBanner" style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">';
+        echo '<span>A more recent <strong>unsaved draft</strong> ('.number_format((int)$recoverDraft['word_count']).' words, autosaved '.e(substr((string)$recoverDraft['created_at'],0,16)).') was found. It was never written to the file.</span>';
+        echo '<span class="toolbar" style="margin:0"><button type="button" class="btn sm primary" id="draftRestore">Load draft into editor</button>';
+        echo '<form method="post" style="display:inline" onsubmit="return confirm(\'Discard the recovered draft? This cannot be undone.\')"><input type="hidden" name="action" value="chapter_revision_discard_draft"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="cid" value="'.(int)$c['id'].'"><button class="btn sm">Discard</button></form></span>';
+        echo '</div>';
+    }
+
     echo '<form method="post" id="entry-form"><input type="hidden" name="action" value="chapter_save"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="cid" value="'.(int)$c['id'].'"><input type="hidden" name="base" value="'.$cbase.'">';
-    echo '<div class="chapterwrap"><div class="chaptermain">';
-    echo '<textarea id="chapter-md" name="md" spellcheck="false" style="width:100%;min-height:62vh;font-family:var(--mono);font-size:13px;line-height:1.5">'.e($c['body']).'</textarea>';
-    echo '<div class="toolbar"><button class="btn primary">Save prose</button><a class="btn" href="'.url(['p'=>'chapter','book'=>$book['id'],'id'=>$c['id']]).'">Cancel</a></div>';
+
+    // Editor toolbar (word count + save status + tool toggles) — sits above the textarea
+    echo '<div class="ed-bar">';
+    echo '<button class="btn primary" type="submit">Save prose</button>';
+    echo '<a class="btn" href="'.url(['p'=>'chapter','book'=>$book['id'],'id'=>$c['id']]).'">Cancel</a>';
+    echo '<span class="ed-sep"></span>';
+    echo '<button type="button" class="btn sm" id="btnFind" title="Find &amp; replace (Ctrl/⌘-F)">Find</button>';
+    echo '<button type="button" class="btn sm" id="btnStyle" title="Local style check">Style</button>';
+    if ($revs) echo '<button type="button" class="btn sm" id="btnRevs">History ('.count($revs).')</button>';
+    echo '<span class="ed-status" id="edStatus">Saved</span>';
+    echo '<span class="ed-wc" id="edWC"></span>';
     echo '</div>';
-    // Phase 9e: live "In this scene" rail that recounts as you type
+
+    // Find & replace bar (hidden until toggled)
+    echo '<div class="ed-find" id="edFind" hidden>'
+       . '<input type="text" id="fFind" placeholder="Find" autocomplete="off">'
+       . '<input type="text" id="fRepl" placeholder="Replace with" autocomplete="off">'
+       . '<label class="ed-case"><input type="checkbox" id="fCase"> Aa</label>'
+       . '<span class="ed-count" id="fCount">0/0</span>'
+       . '<button type="button" class="btn sm" id="fPrev">↑</button>'
+       . '<button type="button" class="btn sm" id="fNext">↓</button>'
+       . '<button type="button" class="btn sm" id="fRep">Replace</button>'
+       . '<button type="button" class="btn sm" id="fRepAll">All</button>'
+       . '<button type="button" class="btn sm" id="fClose">✕</button>'
+       . '</div>';
+
+    echo '<div class="chapterwrap"><div class="chaptermain">';
+    // Markdown formatting toolbar — wraps/prefixes the textarea selection (Ctrl/⌘-B/I/U)
+    echo '<div class="md-toolbar" id="mdToolbar">'
+       . '<button type="button" data-md="bold" title="Bold (Ctrl/⌘-B)" style="font-weight:800">B</button>'
+       . '<button type="button" data-md="italic" title="Italic (Ctrl/⌘-I)" class="md-i">I</button>'
+       . '<button type="button" data-md="underline" title="Underline (Ctrl/⌘-U)" class="md-u">U</button>'
+       . '<button type="button" data-md="strike" title="Strikethrough" class="md-s">S</button>'
+       . '<button type="button" data-md="code" title="Inline code" class="md-code">&lt;/&gt;</button>'
+       . '<span class="md-div"></span>'
+       . '<button type="button" data-md="h2" title="Heading">H</button>'
+       . '<button type="button" data-md="quote" title="Blockquote">&ldquo;</button>'
+       . '<button type="button" data-md="ul" title="Bulleted list">&bull;</button>'
+       . '<button type="button" data-md="ol" title="Numbered list" style="font-size:12px">1.</button>'
+       . '<button type="button" data-md="link" title="Link">&#128279;</button>'
+       . '</div>';
+    echo '<textarea id="chapter-md" name="md" spellcheck="true" style="width:100%;min-height:62vh;font-family:var(--mono);font-size:13px;line-height:1.5">'.e($c['body']).'</textarea>';
+    // Local style-check results (hidden until toggled)
+    echo '<div class="ed-style" id="edStyle" hidden><div class="ed-style-h">Style check <span class="muted" id="edStyleN"></span></div><div id="edStyleList"></div></div>';
+    echo '</div>';
+    // Right rail: scene mentions + revision history + open notes
     echo '<aside class="scenerail" id="sceneRail"><div class="sr-head">In this scene</div><div class="sr-list" id="srList"></div>'
        . '<div class="sr-empty" id="srEmpty">No Codex names detected yet.</div>'
-       . '<div class="sr-note">Counts update live as you type. Names from your Codex auto-link.</div></aside>';
+       . '<div class="sr-note">Counts update live as you type. Names from your Codex auto-link.</div>';
+    if ($revs) {
+        echo '<div class="sr-head" id="revsHead" hidden style="margin-top:16px">Revision history</div><div id="revsList" hidden></div>';
+    }
+    if ($editNotes) {
+        echo '<div class="sr-head" style="margin-top:16px">Open notes ('.count($editNotes).')</div><div class="ed-notes">';
+        foreach ($editNotes as $n) {
+            $clip = function ($s, $n) { $s = (string)$s; return function_exists('mb_strimwidth') ? mb_strimwidth($s, 0, $n, '…') : (strlen($s) > $n ? substr($s, 0, $n - 1).'…' : $s); };
+            echo '<div class="ed-note">';
+            if (trim((string)$n['quote']) !== '') echo '<div class="ed-note-q">“'.e($clip($n['quote'],90)).'”</div>';
+            if (trim((string)$n['note'])  !== '') echo '<div class="ed-note-n">'.e($clip($n['note'],120)).'</div>';
+            echo '</div>';
+        }
+        echo '<a class="sr-note" href="'.url(['p'=>'chapter','book'=>$book['id'],'id'=>$c['id']]).'">Manage notes on the chapter page →</a></div>';
+    }
+    echo '</aside>';
     echo '</div></form>';
-    if (function_exists('build_mention_targets')) {
-        $emeta = []; $dbcolor = [];
-        foreach (all("SELECT slug,name,db_key FROM entries WHERE book_id=?", [$book['id']]) as $r) $emeta[$r['slug']] = ['name'=>$r['name'],'db'=>$r['db_key']];
-        foreach (dbmeta_for($book['profile'] ?? 'fiction') as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
-        $tg = array_map(function($t){ return ['phrase'=>$t['phrase'],'slug'=>$t['slug']]; }, build_mention_targets($book['id']));
-        echo '<script>window.__scene='.json_encode(['book'=>$book['id'],'targets'=>$tg,'meta'=>$emeta,'db'=>$dbcolor], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).';</script>';
-        echo <<<'JS'
+
+    // Floating "add to dictionary" button (created by JS) needs the endpoint + book
+    $emeta = []; $dbcolor = [];
+    foreach (all("SELECT slug,name,db_key FROM entries WHERE book_id=?", [$book['id']]) as $r) $emeta[$r['slug']] = ['name'=>$r['name'],'db'=>$r['db_key']];
+    foreach (dbmeta_for($book['profile'] ?? 'fiction') as $k => $m) $dbcolor[$k] = ['label'=>$m['singular'] ?? $k, 'color'=>$m['hue'] ?? '#888'];
+    $tg = function_exists('build_mention_targets')
+        ? array_map(function($t){ return ['phrase'=>$t['phrase'],'slug'=>$t['slug']]; }, build_mention_targets($book['id']))
+        : [];
+    $edcfg = [
+        'book' => $book['id'], 'cid' => (int)$c['id'], 'base' => $cbase,
+        'targets' => $tg, 'meta' => $emeta, 'db' => $dbcolor,
+        'dict' => array_values($dictWords),
+        'revs' => array_map(function($r){ return ['id'=>(int)$r['id'],'words'=>(int)$r['word_count'],'at'=>substr((string)$r['created_at'],0,16)]; }, $revs),
+        'draftBody' => $recoverDraft ? md_body_norm($recoverDraft['body']) : null,
+    ];
+    echo '<script>window.__scene='.json_encode(['book'=>$book['id'],'targets'=>$tg,'meta'=>$emeta,'db'=>$dbcolor], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).';</script>';
+    echo '<script>window.__ed='.json_encode($edcfg, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).';</script>';
+
+    // Scene rail (Phase 9e) — recount live as you type
+    echo <<<'JS'
 <script>(function(){
   var S=window.__scene; if(!S) return;
   var ta=document.getElementById('chapter-md'), list=document.getElementById('srList'), empty=document.getElementById('srEmpty');
@@ -1306,10 +1464,266 @@ case 'chapter_edit':
     if(empty) empty.style.display=rows.length?'none':'block';
   }
   var t=null; ta.addEventListener('input',function(){ clearTimeout(t); t=setTimeout(render,250); });
-  render();
+  window.__sceneRender=render; render();
 })();</script>
 JS;
+
+    // Phase 15 — autosave, find/replace, style check, revisions, add-to-dictionary, word count
+    echo <<<'JS'
+<script>(function(){
+  var E=window.__ed; if(!E) return;
+  var ta=document.getElementById('chapter-md'), form=document.getElementById('entry-form');
+  if(!ta||!form) return;
+  function post(data){ var b=new URLSearchParams(); Object.keys(data).forEach(function(k){ b.append(k,data[k]); }); return fetch('', {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:b}); }
+  function pad(n){ return (n<10?'0':'')+n; }
+  function words(s){ var m=(s||'').replace(/```[\s\S]*?```/g,' ').match(/[\w'’-]+/g); return m?m.length:0; }
+
+  /* ---- word count + dirty/save status ---- */
+  var startWords=words(ta.value), status=document.getElementById('edStatus'), wc=document.getElementById('edWC');
+  var dirty=false, saving=false, submitted=false;
+  function renderWC(){ var n=words(ta.value), d=n-startWords; wc.textContent=n.toLocaleString()+' words'+(d?' ('+(d>0?'+':'')+d.toLocaleString()+')':''); }
+  function setStatus(txt,cls){ status.textContent=txt; status.className='ed-status'+(cls?' '+cls:''); }
+  renderWC();
+
+  /* ---- debounced autosave (draft only; never writes the .md) ---- */
+  var atimer=null;
+  function scheduleAutosave(){
+    clearTimeout(atimer);
+    atimer=setTimeout(function(){
+      if(!dirty||saving) return;
+      saving=true; setStatus('Saving…','busy');
+      post({action:'chapter_autosave', book:E.book, cid:E.cid, base:E.base, md:ta.value})
+        .then(function(r){ return r.json(); })
+        .then(function(j){
+          saving=false;
+          if(j && j.ok){ dirty=false; var d=new Date();
+            setStatus('Draft saved '+pad(d.getHours())+':'+pad(d.getMinutes())+':'+pad(d.getSeconds()), 'ok');
+            if(j.conflict) setStatus('Draft saved — but this chapter changed on the server; saving may be refused', 'warn');
+          } else setStatus('Autosave failed', 'warn');
+        })
+        .catch(function(){ saving=false; setStatus('Autosave failed (offline?)', 'warn'); });
+    }, 1500);
+  }
+  ta.addEventListener('input', function(){ dirty=true; setStatus('Unsaved changes','busy'); renderWC(); scheduleAutosave(); });
+  form.addEventListener('submit', function(){ submitted=true; });
+  window.addEventListener('beforeunload', function(e){ if(dirty && !submitted){ e.preventDefault(); e.returnValue=''; } });
+
+  /* ---- recover draft ---- */
+  var dr=document.getElementById('draftRestore');
+  if(dr && E.draftBody!=null){ dr.addEventListener('click', function(){
+    ta.value=E.draftBody; dirty=true; renderWC(); setStatus('Draft loaded — review, then Save prose','busy');
+    if(window.__sceneRender)window.__sceneRender(); var b=document.getElementById('draftBanner'); if(b)b.style.display='none'; ta.focus();
+  }); }
+
+  /* ---- find & replace ---- */
+  var fbar=document.getElementById('edFind'), fFind=document.getElementById('fFind'), fRepl=document.getElementById('fRepl'),
+      fCase=document.getElementById('fCase'), fCount=document.getElementById('fCount');
+  var matches=[], cur=-1;
+  function scan(){
+    matches=[]; cur=-1; var q=fFind.value; if(!q){ fCount.textContent='0/0'; return; }
+    var hay=ta.value, needle=q, i=0;
+    if(!fCase.checked){ hay=hay.toLowerCase(); needle=needle.toLowerCase(); }
+    if(!needle){ fCount.textContent='0/0'; return; }
+    while(true){ var idx=hay.indexOf(needle,i); if(idx<0)break; matches.push(idx); i=idx+needle.length; }
+    fCount.textContent=(matches.length?'1/':'0/')+matches.length; if(matches.length)cur=0;
+  }
+  function selectMatch(){ if(cur<0||!matches.length)return; var s=matches[cur], len=fFind.value.length;
+    ta.focus(); ta.setSelectionRange(s,s+len);
+    // scroll caret into view
+    var before=ta.value.substr(0,s), lines=before.split('\n').length, lh=parseFloat(getComputedStyle(ta).lineHeight)||18;
+    ta.scrollTop=Math.max(0,(lines-4)*lh); fCount.textContent=(cur+1)+'/'+matches.length;
+  }
+  function step(d){ if(!matches.length){ scan(); if(!matches.length)return; } cur=(cur+d+matches.length)%matches.length; selectMatch(); }
+  function openFind(){ fbar.hidden=false; var sel=ta.value.substring(ta.selectionStart,ta.selectionEnd); if(sel && sel.length<80)fFind.value=sel; fFind.focus(); fFind.select(); scan(); if(matches.length)selectMatch(); }
+  function closeFind(){ fbar.hidden=true; ta.focus(); }
+  document.getElementById('btnFind').addEventListener('click', function(){ fbar.hidden?openFind():closeFind(); });
+  document.getElementById('fClose').addEventListener('click', closeFind);
+  document.getElementById('fNext').addEventListener('click', function(){ step(1); });
+  document.getElementById('fPrev').addEventListener('click', function(){ step(-1); });
+  fFind.addEventListener('input', function(){ scan(); if(matches.length)selectMatch(); });
+  fCase.addEventListener('change', function(){ scan(); if(matches.length)selectMatch(); });
+  fFind.addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); step(e.shiftKey?-1:1); } if(e.key==='Escape'){ closeFind(); } });
+  function replaceOne(){
+    if(cur<0||!matches.length){ scan(); if(!matches.length)return; }
+    var s=matches[cur], len=fFind.value.length;
+    ta.value=ta.value.substr(0,s)+fRepl.value+ta.value.substr(s+len);
+    dirty=true; setStatus('Unsaved changes','busy'); renderWC(); scheduleAutosave(); if(window.__sceneRender)window.__sceneRender();
+    scan(); if(matches.length){ cur=Math.min(cur,matches.length-1); selectMatch(); }
+  }
+  document.getElementById('fRep').addEventListener('click', replaceOne);
+  document.getElementById('fRepAll').addEventListener('click', function(){
+    var q=fFind.value; if(!q)return; scan(); var n=matches.length; if(!n)return;
+    if(!confirm('Replace all '+n+' occurrence'+(n===1?'':'s')+'?'))return;
+    var out='', hay=ta.value, needle=q, i=0, cmpHay=fCase.checked?hay:hay.toLowerCase(), cmpN=fCase.checked?needle:needle.toLowerCase();
+    while(true){ var idx=cmpHay.indexOf(cmpN,i); if(idx<0){ out+=hay.substr(i); break; } out+=hay.substring(i,idx)+fRepl.value; i=idx+needle.length; }
+    ta.value=out; dirty=true; setStatus('Replaced '+n,'busy'); renderWC(); scheduleAutosave(); if(window.__sceneRender)window.__sceneRender(); scan();
+  });
+  document.addEventListener('keydown', function(e){ if((e.ctrlKey||e.metaKey) && (e.key==='f'||e.key==='F') && (document.activeElement===ta||fbar.contains(document.activeElement)||!fbar.hidden)){ e.preventDefault(); openFind(); } });
+
+  /* ---- local style check (repeated words, doubled punctuation, long sentences) ---- */
+  var stylePanel=document.getElementById('edStyle'), styleList=document.getElementById('edStyleList'), styleN=document.getElementById('edStyleN');
+  function esch(s){ return String(s==null?'':s).replace(/[&<>]/g,function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[m]; }); }
+  function styleScan(){
+    var text=ta.value, hits=[], m, re;
+    re=/(?<!\w)(\w+)(\s+)(\1)(?!\w)/giu;      // repeated word: "the the"
+    while((m=re.exec(text))!==null){ hits.push({s:m.index, e:m.index+m[0].length, kind:'Repeated word', detail:'“'+m[1]+' '+m[3]+'”'}); }
+    re=/([!?,;:])\1+/g;                        // doubled punctuation
+    while((m=re.exec(text))!==null){ hits.push({s:m.index, e:m.index+m[0].length, kind:'Doubled punctuation', detail:'“'+m[0]+'”'}); }
+    re=/  +/g;                                 // multiple spaces
+    while((m=re.exec(text))!==null){ hits.push({s:m.index, e:m.index+m[0].length, kind:'Extra spaces', detail:m[0].length+' spaces'}); }
+    // long sentences (>40 words)
+    var sre=/[^.!?\n]+[.!?]+/g;
+    while((m=sre.exec(text))!==null){ var w=(m[0].match(/[\w'’-]+/g)||[]).length; if(w>40) hits.push({s:m.index, e:m.index+m[0].length, kind:'Long sentence', detail:w+' words'}); }
+    hits.sort(function(a,b){ return a.s-b.s; });
+    styleN.textContent=hits.length?('· '+hits.length+' flag'+(hits.length===1?'':'s')):'· nothing flagged';
+    styleList.innerHTML='';
+    if(!hits.length){ styleList.innerHTML='<div class="ed-style-empty">No repeated words, doubled punctuation, or overlong sentences.</div>'; return; }
+    hits.slice(0,120).forEach(function(h){
+      var row=document.createElement('button'); row.type='button'; row.className='ed-style-row';
+      row.innerHTML='<span class="ed-style-kind">'+esch(h.kind)+'</span> <span class="muted">'+esch(h.detail)+'</span>';
+      row.addEventListener('click', function(){ ta.focus(); ta.setSelectionRange(h.s,h.e);
+        var lines=ta.value.substr(0,h.s).split('\n').length, lh=parseFloat(getComputedStyle(ta).lineHeight)||18; ta.scrollTop=Math.max(0,(lines-4)*lh); });
+      styleList.appendChild(row);
+    });
+  }
+  document.getElementById('btnStyle').addEventListener('click', function(){ stylePanel.hidden=!stylePanel.hidden; if(!stylePanel.hidden)styleScan(); });
+  ta.addEventListener('input', function(){ if(!stylePanel.hidden){ clearTimeout(styleScan._t); styleScan._t=setTimeout(styleScan,400); } });
+
+  /* ---- revision history panel ---- */
+  var btnRevs=document.getElementById('btnRevs'), revsHead=document.getElementById('revsHead'), revsList=document.getElementById('revsList');
+  if(btnRevs && revsList){
+    function renderRevs(){
+      revsList.innerHTML='';
+      (E.revs||[]).forEach(function(r){
+        var row=document.createElement('div'); row.className='rev-row';
+        row.innerHTML='<span class="rev-at">'+esch(r.at)+'</span><span class="rev-w muted">'+r.words.toLocaleString()+'w</span>';
+        var b=document.createElement('button'); b.type='button'; b.className='btn sm'; b.textContent='Load';
+        b.addEventListener('click', function(){
+          if(dirty && !confirm('Load this version? Your current unsaved changes in the editor will be replaced (the draft on the server is kept).'))return;
+          post({action:'chapter_revision_get', book:E.book, id:r.id}).then(function(x){return x.json();}).then(function(j){
+            if(j&&j.ok){ ta.value=j.body; dirty=true; renderWC(); setStatus('Loaded snapshot — review, then Save prose','busy'); if(window.__sceneRender)window.__sceneRender(); scheduleAutosave(); }
+          });
+        });
+        row.appendChild(b); revsList.appendChild(row);
+      });
     }
+    btnRevs.addEventListener('click', function(){ var h=revsHead.hidden; revsHead.hidden=!h; revsList.hidden=!h; if(h)renderRevs(); });
+  }
+
+  /* ---- add-to-dictionary from a selection ---- */
+  var known={}; (E.dict||[]).forEach(function(w){ known[w.toLowerCase()]=true; });
+  var addBtn=document.createElement('button'); addBtn.type='button'; addBtn.id='dictAdd'; addBtn.textContent='+ Add to dictionary';
+  addBtn.style.cssText='position:absolute;z-index:60;display:none;border:0;border-radius:6px;padding:5px 10px;font:500 12px/1 var(--body-font);color:#fff;background:var(--accent);cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.22)';
+  document.body.appendChild(addBtn);
+  function selWord(){ var s=ta.value.substring(ta.selectionStart,ta.selectionEnd).trim(); return (/^[\p{L}][\p{L}'’-]{1,60}$/u.test(s))?s:''; }
+  function placeAdd(){
+    var w=selWord();
+    if(!w || known[w.toLowerCase()]){ addBtn.style.display='none'; return; }
+    // position near the selection using a mirror measurement is heavy; anchor to caret via textarea rect + rough offset
+    var rect=ta.getBoundingClientRect();
+    addBtn.textContent='+ Add “'+w+'” to dictionary'; addBtn.dataset.w=w;
+    addBtn.style.top=(window.scrollY+rect.top+8)+'px'; addBtn.style.left=(window.scrollX+rect.left+8)+'px'; addBtn.style.display='block';
+  }
+  ta.addEventListener('mouseup', function(){ setTimeout(placeAdd,1); });
+  ta.addEventListener('keyup', function(e){ if(e.shiftKey||e.key==='Shift')setTimeout(placeAdd,1); });
+  ta.addEventListener('scroll', function(){ addBtn.style.display='none'; });
+  addBtn.addEventListener('mousedown', function(ev){ ev.preventDefault();
+    var w=addBtn.dataset.w; if(!w)return; addBtn.style.display='none';
+    post({action:'dictionary_add', ajax:'1', book:E.book, term:w}).then(function(r){return r.json();}).then(function(j){
+      if(j&&j.ok){ known[w.toLowerCase()]=true; setStatus('Added “'+w+'” to dictionary','ok'); setTimeout(function(){ if(!dirty)setStatus('Saved'); },1800); }
+    });
+  });
+})();</script>
+JS;
+
+    // Phase 15 — Markdown formatting toolbar (wrap/prefix the textarea selection)
+    echo <<<'JS'
+<script>(function(){
+  var ta=document.getElementById('chapter-md'), bar=document.getElementById('mdToolbar');
+  if(!ta||!bar) return;
+  function fire(){ ta.dispatchEvent(new Event('input',{bubbles:true})); }   // drive autosave/word-count/scene/style
+  function wrap(before, after){
+    after = (after===undefined) ? before : after;
+    var s=ta.selectionStart, e=ta.selectionEnd, v=ta.value, sel=v.slice(s,e);
+    // toggle off: markers inside the selection …
+    if(sel.length>=before.length+after.length && sel.slice(0,before.length)===before && sel.slice(sel.length-after.length)===after){
+      var inner=sel.slice(before.length, sel.length-after.length);
+      ta.setRangeText(inner, s, e, 'select'); ta.focus(); fire(); return;
+    }
+    // … or markers just outside it
+    if(v.slice(Math.max(0,s-before.length),s)===before && v.slice(e,e+after.length)===after){
+      ta.setRangeText(sel, s-before.length, e+after.length, 'select'); ta.focus(); fire(); return;
+    }
+    ta.setRangeText(before+sel+after, s, e, 'end');
+    if(s===e){ var p=s+before.length; ta.setSelectionRange(p,p); }        // empty: caret between markers
+    else ta.setSelectionRange(s+before.length, e+before.length);          // keep the text selected
+    ta.focus(); fire();
+  }
+  function prefixLines(prefix, numbered){
+    var s=ta.selectionStart, e=ta.selectionEnd, v=ta.value;
+    var ls=v.lastIndexOf('\n', s-1)+1, le=v.indexOf('\n', e); if(le<0)le=v.length;
+    var lines=v.slice(ls,le).split('\n');
+    var re=numbered ? /^\d+[.)]\s+/ : new RegExp('^'+prefix.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'));
+    var all=lines.every(function(l){ return l==='' || re.test(l); });
+    var n=0, out=lines.map(function(l){
+      if(all) return l.replace(re,'');
+      if(l==='') return l;
+      n++; return (numbered ? (n+'. ') : prefix) + l;
+    }).join('\n');
+    ta.setRangeText(out, ls, le, 'select'); ta.focus(); fire();
+  }
+  function link(){
+    var s=ta.selectionStart, e=ta.selectionEnd, sel=ta.value.slice(s,e), text=sel||'text';
+    var md='['+text+'](https://)';
+    ta.setRangeText(md, s, e, 'end');
+    var us=s+md.indexOf('(')+1; ta.setSelectionRange(us, us+8); ta.focus(); fire();  // select "https://"
+  }
+  var actions={
+    bold:function(){wrap('**');}, italic:function(){wrap('*');}, underline:function(){wrap('<u>','</u>');},
+    strike:function(){wrap('~~');}, code:function(){wrap('`');},
+    h2:function(){prefixLines('## ');}, quote:function(){prefixLines('> ');},
+    ul:function(){prefixLines('- ');}, ol:function(){prefixLines('',true);}, link:link
+  };
+  bar.addEventListener('mousedown', function(ev){ var b=ev.target.closest('button[data-md]'); if(!b)return; ev.preventDefault(); (actions[b.dataset.md]||function(){})(); });
+  ta.addEventListener('keydown', function(e){
+    if(!(e.ctrlKey||e.metaKey)||e.altKey) return;
+    var k=e.key.toLowerCase();
+    if(k==='b'){ e.preventDefault(); actions.bold(); }
+    else if(k==='i'){ e.preventDefault(); actions.italic(); }
+    else if(k==='u'){ e.preventDefault(); actions.underline(); }
+  });
+})();</script>
+JS;
+    break;
+
+case 'dictionary':
+    $terms = get_dictionary_terms($book['id']);
+    $nUser = 0; $nCodex = 0; foreach ($terms as $tt) { if (($tt['source'] ?? '') === 'codex') $nCodex++; else $nUser++; }
+    echo '<div class="pagehead"><div><h1>Custom dictionary</h1><p class="desc">Words this book’s prose editor should treat as correctly spelled — invented names, jargon, coined terms. Add your Codex entry names and aliases in one click so proper nouns stop underlining. Spelling itself is underlined by your browser; this list records the terms you’ve marked valid (and feeds future editor tooling). Nothing here touches your Markdown files.</p></div></div>';
+
+    echo '<div class="toolbar" style="gap:8px">';
+    echo '<form method="post" style="display:inline"><input type="hidden" name="action" value="dictionary_import_codex"><input type="hidden" name="book" value="'.e($book['id']).'"><button class="btn">Import all Codex names</button></form>';
+    echo '<form method="post" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><input type="hidden" name="action" value="dictionary_add"><input type="hidden" name="book" value="'.e($book['id']).'">';
+    echo '<input type="text" name="term" placeholder="Add a term…" maxlength="190" style="padding:6px 9px;border:1px solid var(--line,#d8d3c8);border-radius:6px" required><button class="btn primary">Add</button></form>';
+    echo '</div>';
+
+    echo '<p class="muted" style="font-size:13px">'.count($terms).' term'.(count($terms)===1?'':'s').' · '.$nCodex.' from Codex · '.$nUser.' added by you.</p>';
+
+    if (!$terms) {
+        echo '<p class="empty">No terms yet. Click <strong>Import all Codex names</strong> to seed it from your entries and aliases, or add words one at a time.</p>';
+    } else {
+        echo '<div class="dict-grid" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:10px">';
+        foreach ($terms as $tt) {
+            $isCodex = ($tt['source'] ?? '') === 'codex';
+            echo '<span class="dict-term" style="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line,#e4e0d8);border-radius:20px;padding:4px 6px 4px 12px'.($isCodex?';background:var(--accent-soft,#f6f3ee)':'').'">';
+            echo e($tt['term']);
+            if ($isCodex) echo ' <span class="muted mono" style="font-size:10px">codex</span>';
+            echo '<form method="post" style="display:inline;margin:0" title="Remove"><input type="hidden" name="action" value="dictionary_remove"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="id" value="'.(int)$tt['id'].'"><button class="btn sm" style="padding:1px 7px;border-radius:50%;line-height:1">×</button></form>';
+            echo '</span>';
+        }
+        echo '</div>';
+    }
+    echo '<div class="toolbar" style="margin-top:20px"><a class="btn sm" href="'.url(['p'=>'manuscript','book'=>$book['id']]).'">← Manuscript</a></div>';
     break;
 
 case 'progressions':

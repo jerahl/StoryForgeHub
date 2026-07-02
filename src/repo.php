@@ -196,9 +196,8 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     if ($rel === '' || strpos($rel, '..') !== false) return ['status'=>'error', 'msg'=>'Bad chapter path.'];
     $path = rtrim($books, '/').'/'.$b['folder'].'/Manuscript/'.$rel;
 
-    $norm = function ($s) { return str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], (string)$s); };
-    $new_md = $norm($new_md);
-    $dbBody = $norm($c['body']);
+    $new_md = md_body_norm($new_md);
+    $dbBody = md_body_norm($c['body']);
 
     // Guard against a sync updating this chapter between open and save: the edit
     // page stamps md5() of the body it loaded; refuse if the DB no longer matches.
@@ -206,11 +205,13 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
         return ['status'=>'conflict', 'msg'=>'This chapter changed since you opened the editor (a sync updated it). Re-open the chapter and reapply your changes.'];
 
     if (is_file($path)) {
-        $onDisk = $norm(@file_get_contents($path));
+        $onDisk = md_body_norm(@file_get_contents($path));
         if ($onDisk !== $dbBody)
             return ['status'=>'conflict', 'msg'=>'The chapter file changed on disk since you opened it (an external edit or sync). Re-open the chapter and reapply your changes.'];
-        if ($onDisk === $new_md)
+        if ($onDisk === $new_md) {
+            discard_chapter_autosave($book_id, (int)$chapter_id);   // Phase 15: nothing changed, drop any stale draft
             return ['status'=>'ok', 'msg'=>'No changes.'];
+        }
     }
 
     // backup the current file before overwriting + write (shared with create/import)
@@ -223,6 +224,8 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     reconcile_scenes($book_id, (int)$chapter_id, $new_md);
     reconcile_exercises($book_id, (int)$chapter_id, $new_md);   // Phase 13
     reconcile_citations($book_id);   // Phase 12: prose edit may add/remove [^cite:key] tokens
+    save_chapter_snapshot($book_id, (int)$chapter_id, $c['file'], $new_md, 'save');  // Phase 15: recoverable history
+    discard_chapter_autosave($book_id, (int)$chapter_id);                            // committed — drop the working draft
     return ['status'=>'ok', 'msg'=>'Saved to the manuscript file and database.'];
 }
 
@@ -981,6 +984,136 @@ function set_chapter_note_status($id, $status) {
 }
 function set_chapter_note_task($id, $task_id) { q("UPDATE chapter_notes SET task_id=? WHERE id=?", [$task_id, $id]); }
 function delete_chapter_note($id) { q("DELETE FROM chapter_notes WHERE id=?", [$id]); }
+
+/* ==================================================== Phase 15: editor robustness */
+
+/* -------------------------------------------------------- custom dictionary
+ * Per-book spell-check dictionary. Holds invented names and jargon that
+ * browser-native spell check flags as errors — plus a one-click import of the
+ * Codex entry names/aliases (the P5 mention index) so proper nouns stop
+ * underlining. All additive; nothing here touches the Markdown source. */
+function ensure_dictionary_terms() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec("CREATE TABLE IF NOT EXISTS dictionary_terms (
+        id $pk, book_id VARCHAR(40) NOT NULL, term VARCHAR(190) NOT NULL,
+        source VARCHAR(10) DEFAULT 'user', created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
+    try { db()->exec("CREATE UNIQUE INDEX uniq_dict ON dictionary_terms (book_id, term)"); } catch (Exception $e) {}
+}
+function get_dictionary_terms($book_id) {
+    ensure_dictionary_terms();
+    return all("SELECT * FROM dictionary_terms WHERE book_id=? ORDER BY LOWER(term)", [$book_id]);
+}
+/** Just the term strings — handed to the editor for the client-side dictionary check. */
+function get_dictionary_words($book_id) {
+    return array_map(function ($r) { return $r['term']; }, get_dictionary_terms($book_id));
+}
+function dictionary_has($book_id, $term) {
+    ensure_dictionary_terms();
+    return (int) val("SELECT COUNT(*) FROM dictionary_terms WHERE book_id=? AND LOWER(term)=LOWER(?)",
+        [$book_id, trim((string)$term)]) > 0;
+}
+/** Add one term. Returns true if inserted, false if empty / too long / already present. */
+function add_dictionary_term($book_id, $term, $source = 'user') {
+    ensure_dictionary_terms();
+    $term = trim(preg_replace('/\s+/u', ' ', (string)$term));
+    $len  = function_exists('mb_strlen') ? mb_strlen($term) : strlen($term);
+    if ($term === '' || $len > 190) return false;
+    if (dictionary_has($book_id, $term)) return false;
+    try { q("INSERT INTO dictionary_terms (book_id, term, source) VALUES (?,?,?)",
+        [$book_id, $term, $source === 'codex' ? 'codex' : 'user']); }
+    catch (Exception $e) { return false; }   // unique-index race
+    return true;
+}
+function remove_dictionary_term($book_id, $id) {
+    ensure_dictionary_terms();
+    q("DELETE FROM dictionary_terms WHERE book_id=? AND id=?", [$book_id, (int)$id]);
+}
+/** Pull capitalised word tokens out of every entry name/alias (via the mention
+ *  index) into the dictionary as source='codex'. Proper nouns are what native
+ *  spell check false-flags, so those are exactly what we want it to learn.
+ *  Returns the number of new terms added. */
+function import_codex_dictionary_terms($book_id) {
+    ensure_dictionary_terms();
+    $added = 0; $seen = [];
+    foreach (build_mention_targets($book_id) as $t) {
+        foreach (preg_split('/\s+/u', (string)$t['phrase']) as $w) {
+            $w = trim($w, " \t\n\r\"'’.,;:!?()[]{}");
+            if ($w === '' || isset($seen[strtolower($w)])) continue;
+            // capitalised, 3+ letters — skips "the", "of", lowercased connectors.
+            if (!preg_match('/^[\p{Lu}][\p{L}\'’\-]{2,}$/u', $w)) continue;
+            $seen[strtolower($w)] = true;
+            if (add_dictionary_term($book_id, $w, 'codex')) $added++;
+        }
+    }
+    return $added;
+}
+
+/* ------------------------------------------------- chapter revisions / autosave
+ * Recoverable history for the prose editor. A 'save' snapshot is taken every time
+ * write_chapter_file() commits (bounded to the newest KEEP per chapter); a single
+ * 'autosave' draft per chapter holds unsaved keystrokes and NEVER touches the
+ * canonical Markdown file — so it can't violate the P9 never-clobber rule. */
+function ensure_chapter_revisions() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec("CREATE TABLE IF NOT EXISTS chapter_revisions (
+        id $pk, book_id VARCHAR(40) NOT NULL, chapter_id INT NOT NULL, chapter_file VARCHAR(255) DEFAULT '',
+        body MEDIUMTEXT, body_hash VARCHAR(40) DEFAULT '', word_count INT DEFAULT 0,
+        kind VARCHAR(10) DEFAULT 'save', created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_rev_ch ON chapter_revisions (book_id, chapter_id)"); } catch (Exception $e) {}
+}
+/** How many 'save' snapshots to retain per chapter. */
+const CHAPTER_REVISION_KEEP = 20;
+
+/** Take a committed 'save' snapshot. No-op if the newest snapshot already has the
+ *  same body (so re-saving an unchanged chapter doesn't spam history). Prunes to
+ *  the newest CHAPTER_REVISION_KEEP. */
+function save_chapter_snapshot($book_id, $chapter_id, $file, $body, $kind = 'save') {
+    ensure_chapter_revisions();
+    $body = md_body_norm($body);
+    $hash = md5($body);
+    $last = one("SELECT body_hash FROM chapter_revisions WHERE book_id=? AND chapter_id=? AND kind='save' ORDER BY id DESC LIMIT 1",
+        [$book_id, (int)$chapter_id]);
+    if ($kind === 'save' && $last && $last['body_hash'] === $hash) return;
+    q("INSERT INTO chapter_revisions (book_id, chapter_id, chapter_file, body, body_hash, word_count, kind) VALUES (?,?,?,?,?,?,?)",
+        [$book_id, (int)$chapter_id, (string)$file, $body, $hash, md_word_count($body), $kind]);
+    // prune old 'save' snapshots, newest KEEP survive
+    $keepIds = array_map(function ($r) { return (int)$r['id']; },
+        all("SELECT id FROM chapter_revisions WHERE book_id=? AND chapter_id=? AND kind='save' ORDER BY id DESC LIMIT " . (int)CHAPTER_REVISION_KEEP,
+            [$book_id, (int)$chapter_id]));
+    if ($keepIds)
+        q("DELETE FROM chapter_revisions WHERE book_id=? AND chapter_id=? AND kind='save' AND id NOT IN (" . implode(',', $keepIds) . ")",
+            [$book_id, (int)$chapter_id]);
+}
+/** Upsert the single autosave draft for a chapter (one row, always the latest). */
+function save_chapter_autosave_draft($book_id, $chapter_id, $file, $body) {
+    ensure_chapter_revisions();
+    $body = md_body_norm($body);
+    q("DELETE FROM chapter_revisions WHERE book_id=? AND chapter_id=? AND kind='autosave'", [$book_id, (int)$chapter_id]);
+    q("INSERT INTO chapter_revisions (book_id, chapter_id, chapter_file, body, body_hash, word_count, kind) VALUES (?,?,?,?,?,?, 'autosave')",
+        [$book_id, (int)$chapter_id, (string)$file, $body, md5($body), md_word_count($body)]);
+}
+function discard_chapter_autosave($book_id, $chapter_id) {
+    ensure_chapter_revisions();
+    q("DELETE FROM chapter_revisions WHERE book_id=? AND chapter_id=? AND kind='autosave'", [$book_id, (int)$chapter_id]);
+}
+function get_chapter_autosave_draft($book_id, $chapter_id) {
+    ensure_chapter_revisions();
+    return one("SELECT * FROM chapter_revisions WHERE book_id=? AND chapter_id=? AND kind='autosave' ORDER BY id DESC LIMIT 1",
+        [$book_id, (int)$chapter_id]);
+}
+/** 'save' snapshots for the history panel, newest first (no body — metadata only). */
+function get_chapter_revisions($book_id, $chapter_id, $limit = 25) {
+    ensure_chapter_revisions();
+    return all("SELECT id, body_hash, word_count, kind, created_at FROM chapter_revisions
+        WHERE book_id=? AND chapter_id=? AND kind='save' ORDER BY id DESC LIMIT " . (int)$limit,
+        [$book_id, (int)$chapter_id]);
+}
+function get_chapter_revision($book_id, $id) {
+    ensure_chapter_revisions();
+    return one("SELECT * FROM chapter_revisions WHERE book_id=? AND id=?", [$book_id, (int)$id]);
+}
 
 /* ----------------------------------------------------------- sync_state */
 function sync_get($book_id, $k) { return val("SELECT v FROM sync_state WHERE book_id=? AND k=?", [$book_id, $k]); }
