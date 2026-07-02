@@ -209,6 +209,7 @@ function render_sidebar($book, $active, $activeDb = null) {
       <a class="navitem <?= $active==='vision'?'active':'' ?>" href="<?=url(['p'=>'vision','book'=>$bid])?>"><span class="dot" style="background:#c98ad6"></span>Mood board</a>
       <a class="navitem <?= $active==='meta'?'active':'' ?>" href="<?=url(['p'=>'meta','book'=>$bid])?>"><span class="dot" style="background:#7A715F"></span>Meta</a>
       <a class="navitem <?= $active==='notes'?'active':'' ?>" href="<?=url(['p'=>'notes','book'=>$bid])?>"><span class="dot" style="background:#6E8A6A"></span>Notes</a>
+      <a class="navitem <?= $active==='members'?'active':'' ?>" href="<?=url(['p'=>'members','book'=>$bid])?>"><span class="dot" style="background:#5E8CA8"></span>Members</a>
       <?php endif ?>
 
       <div class="navgroup">System</div>

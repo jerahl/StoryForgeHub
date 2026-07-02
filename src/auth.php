@@ -33,6 +33,7 @@ function ensure_users() {
             email VARCHAR(190) DEFAULT '',
             token VARCHAR(64) NOT NULL,
             role VARCHAR(20) DEFAULT 'editor',
+            book_id VARCHAR(40) DEFAULT '',
             is_admin INT DEFAULT 0,
             invited_by INT DEFAULT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -50,6 +51,9 @@ function ensure_users() {
     try { db()->exec("CREATE UNIQUE INDEX uniq_user_email ON users (email)"); } catch (Exception $e) {}
     try { db()->exec("CREATE UNIQUE INDEX uniq_invite_token ON invites (token)"); } catch (Exception $e) {}
     try { db()->exec("CREATE UNIQUE INDEX uniq_reset_token ON password_resets (token)"); } catch (Exception $e) {}
+    // Additive upgrade: per-book invites (Phase 19) — an invite can carry the book
+    // it grants access to, so accepting it also creates the membership.
+    try { db()->exec("ALTER TABLE invites ADD COLUMN book_id VARCHAR(40) DEFAULT ''"); } catch (Exception $e) {}
 }
 
 /* ------------------------------------------------------------ small helpers */
@@ -167,7 +171,7 @@ function user_is_admin()   { $u = current_user(); return $u && (int)$u['is_admin
  * Create an invite for $email at an intended book $role (used by P18/P19).
  * Returns the raw token. No public signup exists — only admins call this.
  */
-function create_invite($email, $role = 'editor', $is_admin = 0, $invited_by = null, $ttl_days = 14) {
+function create_invite($email, $role = 'editor', $is_admin = 0, $invited_by = null, $ttl_days = 14, $book_id = '') {
     ensure_users();
     $email = normalize_email($email);
     if ($email !== '' && !filter_var($email, FILTER_VALIDATE_EMAIL))
@@ -177,8 +181,8 @@ function create_invite($email, $role = 'editor', $is_admin = 0, $invited_by = nu
     $role = in_array($role, ['owner','editor','viewer'], true) ? $role : 'editor';
     $token = gen_token(24);
     $expires = date('Y-m-d H:i:s', time() + $ttl_days * 86400);
-    q("INSERT INTO invites (email, token, role, is_admin, invited_by, expires_at) VALUES (?,?,?,?,?,?)",
-      [$email, $token, $role, $is_admin ? 1 : 0, $invited_by !== null ? (int)$invited_by : null, $expires]);
+    q("INSERT INTO invites (email, token, role, book_id, is_admin, invited_by, expires_at) VALUES (?,?,?,?,?,?,?)",
+      [$email, $token, $role, (string)$book_id, $is_admin ? 1 : 0, $invited_by !== null ? (int)$invited_by : null, $expires]);
     return $token;
 }
 function get_invite_by_token($token) { ensure_users(); return one("SELECT * FROM invites WHERE token=?", [(string)$token]); }
@@ -194,6 +198,11 @@ function list_invites($pending_only = true) {
     return all($sql);
 }
 function revoke_invite($id) { ensure_users(); q("DELETE FROM invites WHERE id=? AND accepted_at IS NULL", [(int)$id]); }
+/** Pending invites scoped to one book (Phase 19 per-book member management). */
+function list_book_invites($book_id) {
+    ensure_users();
+    return all("SELECT * FROM invites WHERE accepted_at IS NULL AND book_id=? ORDER BY created_at DESC, id DESC", [(string)$book_id]);
+}
 
 /**
  * Accept an invite: create the real user, mark the invite consumed.
@@ -206,6 +215,8 @@ function accept_invite($token, $display_name, $password) {
     $email = normalize_email($inv['email']);
     if ($email === '') throw new RuntimeException('This invite has no email on file; ask your admin to reissue it.');
     $uid = create_user($email, $display_name, $password, (int)$inv['is_admin'], 'active');
+    // Phase 19: a per-book invite also grants membership on acceptance.
+    if (!empty($inv['book_id'])) add_book_member($inv['book_id'], $uid, $inv['role'] ?: 'editor', (int)($inv['invited_by'] ?? 0) ?: null);
     q("UPDATE invites SET accepted_at=CURRENT_TIMESTAMP, accepted_user_id=? WHERE id=?", [$uid, (int)$inv['id']]);
     return $uid;
 }
@@ -333,4 +344,66 @@ function book_scope_uid() {
     if ($uid === null) return null;        // token API / CLI → full access
     if (user_is_admin()) return null;      // admins see everything
     return $uid;
+}
+
+/* --------------------------------------------- roles & permissions (Phase 19)
+
+   The role matrix, enforced server-side on every book-scoped mutation:
+     owner   — full read/write + manage members/invites + delete the book
+     editor  — read/write prose, entries, sources, tasks, plot board
+     viewer  — read everything; may add comments / chapter_notes; no prose edits
+   Admins and the unscoped token/CLI path bypass the matrix.
+   ------------------------------------------------------------------------- */
+
+/** Does a role grant a capability? Capabilities: view | comment | edit | manage. */
+function role_allows($role, $cap) {
+    switch ($cap) {
+        case 'view':
+        case 'comment': return in_array($role, ['owner','editor','viewer'], true);
+        case 'edit':    return in_array($role, ['owner','editor'], true);
+        case 'manage':  return $role === 'owner';
+    }
+    return false;
+}
+
+/** Can the caller perform $cap on $book_id? Admin & unscoped (token/CLI) always may. */
+function user_can($book_id, $cap) {
+    $uid = current_user_id();
+    if ($uid === null) return true;      // token API / CLI — unscoped (P20 governs MCP)
+    if (user_is_admin()) return true;    // instance admin — superuser
+    if ($book_id === null || $book_id === '') return false;
+    return role_allows(user_book_role($uid, $book_id), $cap);
+}
+
+/* ----------------------------------------------- book activity log (Phase 19)
+   A lightweight who-did-what-when trail, valuable the moment a book is shared. */
+
+function ensure_book_activity() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec(
+        "CREATE TABLE IF NOT EXISTS book_activity (
+            id $pk,
+            book_id VARCHAR(40) NOT NULL,
+            user_id INT DEFAULT NULL,
+            action VARCHAR(40) NOT NULL,
+            detail VARCHAR(255) DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"
+    ); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_activity_book ON book_activity (book_id)"); } catch (Exception $e) {}
+}
+/** Record an action against a book. Best-effort; never throws into the caller. */
+function log_activity($book_id, $action, $detail = '') {
+    if ($book_id === null || $book_id === '') return;
+    ensure_book_activity();
+    try { q("INSERT INTO book_activity (book_id, user_id, action, detail) VALUES (?,?,?,?)",
+             [$book_id, current_user_id(), (string)$action, mb_substr((string)$detail, 0, 255)]); }
+    catch (Exception $e) {}
+}
+function recent_activity($book_id, $limit = 20) {
+    ensure_book_activity();
+    $limit = max(1, min(200, (int)$limit));
+    return all("SELECT a.*, u.display_name, u.email FROM book_activity a
+                LEFT JOIN users u ON u.id=a.user_id
+                WHERE a.book_id=? ORDER BY a.id DESC LIMIT $limit", [$book_id]);
 }

@@ -297,7 +297,8 @@ CREATE TABLE IF NOT EXISTS invites (
   id               INT AUTO_INCREMENT PRIMARY KEY,
   email            VARCHAR(190) DEFAULT '',
   token            VARCHAR(64)  NOT NULL,
-  role             VARCHAR(20)  DEFAULT 'editor',      -- intended per-book role (used by P18/P19)
+  role             VARCHAR(20)  DEFAULT 'editor',      -- per-book role granted on acceptance (P19)
+  book_id          VARCHAR(40)  DEFAULT '',            -- book the invite grants access to ('' = account-only)
   is_admin         INT          DEFAULT 0,
   invited_by       INT          DEFAULT NULL,
   created_at       DATETIME     DEFAULT CURRENT_TIMESTAMP,
@@ -330,6 +331,17 @@ CREATE TABLE IF NOT EXISTS book_members (
   created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY uniq_book_member (book_id, user_id),
   KEY k_member_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- book_activity (Phase 19) — lightweight who-did-what-when trail for a shared book.
+CREATE TABLE IF NOT EXISTS book_activity (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  book_id     VARCHAR(40)  NOT NULL,
+  user_id     INT          DEFAULT NULL,
+  action      VARCHAR(40)  NOT NULL,                  -- entry_save|chapter_save|member_add|...
+  detail      VARCHAR(255) DEFAULT '',
+  created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  KEY k_activity_book (book_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 SET foreign_key_checks = 1;

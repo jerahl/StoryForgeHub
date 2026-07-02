@@ -45,6 +45,20 @@ function set_book_profile($book_id, $profile) {
     ensure_book_profile();
     q("UPDATE books SET profile=? WHERE id=?", [normalize_profile($profile), $book_id]);
 }
+/** Authoritative book id a subject row belongs to (Phase 19 authorization).
+ *  Table is whitelisted so it can be interpolated safely. Returns null if absent. */
+function book_of($table, $id) {
+    static $ok = ['tasks','threads','chapters','sources','canvas_cards','canvas_links',
+                  'acts','vision_items','captures','chapter_notes','scenes','progressions',
+                  'entries','exercises','meta_pages','note_pages'];
+    if (!in_array($table, $ok, true)) return null;
+    return val("SELECT book_id FROM $table WHERE id=?", [(int)$id]);
+}
+/** Book id owning a task step (via its parent task). */
+function book_of_step($step_id) {
+    return val("SELECT t.book_id FROM task_steps s JOIN tasks t ON t.id=s.task_id WHERE s.id=?", [(int)$step_id]);
+}
+
 function decorate_book($b) {
     $id = $b['id'];
     $b['profile'] = normalize_profile($b['profile'] ?? 'fiction');

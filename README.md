@@ -129,3 +129,10 @@ because a copy lives at `projects/books/.claude/skills/codex-webapp-sync/`.
   shows each member exactly the books they belong to; creating or importing a book makes you
   its owner. Admins and the token REST API see every book (per-user MCP auth is a later phase).
   On upgrade, your existing books are backfilled to the first admin as owner.
+- **Roles & permissions** (Phase 19): every book-scoped write is checked server-side against
+  the caller's role — **owner** (full control + manage members + delete), **editor** (read/write
+  prose, entries, sources, tasks, plot board), **viewer** (read + comments/notes, no edits). The
+  target book is resolved from the object being changed (not the submitted form field), so you
+  can't reach another book's data by id. Owners manage collaborators on each book's **Members**
+  page (add existing accounts, invite new ones at a role, change roles, revoke), and a per-book
+  **activity log** records who changed what. The Sync page and snapshot import are admin-only.

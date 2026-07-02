@@ -29,11 +29,86 @@ $mode     = $_COOKIE['mode']     ?? ($CFG['mode'] ?? 'Beacon');
 function flash($msg, $type='ok') { $_SESSION['flash'] = [$msg, $type]; }
 function redirect($params) { header('Location: ' . url($params)); exit; }
 
+/**
+ * Phase 19 — role enforcement gate. For a POST action, return the capability it
+ * needs and the AUTHORITATIVE target book (resolved from the subject id, never
+ * the submitted `book` field — that closes cross-book IDOR), plus whether the
+ * endpoint answers JSON. Returns null for actions that aren't book-scoped
+ * (account/admin/create/personal-inbox — those guard themselves elsewhere).
+ */
+function book_gate($a) {
+    $P = $_POST;
+    $mk = function($cap, $book, $json = false) { return ['cap'=>$cap, 'book'=>(string)$book, 'json'=>$json]; };
+    $postbook = $P['book'] ?? '';
+    switch ($a) {
+        /* --- edit, target book from the explicit `book` field (mutators confine
+              their writes to that book, so the field is authoritative here) --- */
+        case 'entry_save': case 'entry_new': case 'entry_delete': case 'meta_save':
+        case 'task_save': case 'log_add': case 'scene_label': case 'progression_when':
+        case 'reindex_mentions': case 'chapter_save': case 'chapter_new': case 'chapter_import':
+        case 'dictionary_add': case 'dictionary_remove': case 'dictionary_import_codex':
+        case 'book_profile': case 'source_save': case 'act_add': case 'sprint_log':
+        case 'vision_add': case 'reorder_chapters': case 'reorder_scenes':
+        case 'canvas_add_card': case 'canvas_add_ref_card': case 'canvas_add_link':
+            $json = in_array($a, ['reorder_chapters','reorder_scenes','canvas_add_card','canvas_add_ref_card','canvas_add_link','dictionary_add'], true);
+            return $mk('edit', $postbook, $json);
+        case 'chapter_autosave': case 'chapter_revision_get': case 'chapter_revision_discard_draft':
+            return $mk('edit', book_of('chapters', $P['id'] ?? $P['cid'] ?? 0), true);
+
+        /* --- edit, target book resolved from the subject id (IDOR-safe) --- */
+        case 'task_status': case 'task_delete': case 'task_cycle_due': case 'task_cycle_priority':
+            return $mk('edit', book_of('tasks', $P['id'] ?? 0));
+        case 'step_add':
+            return $mk('edit', book_of('tasks', $P['task_id'] ?? 0));
+        case 'step_toggle': case 'step_delete':
+            return $mk('edit', book_of_step($P['id'] ?? 0));
+        case 'thread_status':
+            return $mk('edit', book_of('threads', $P['id'] ?? 0));
+        case 'chapter_status': case 'chapter_archive': case 'chapter_restore': case 'chapter_delete':
+            return $mk('edit', book_of('chapters', $P['id'] ?? 0));
+        case 'source_delete':
+            return $mk('edit', book_of('sources', $P['id'] ?? 0));
+        case 'act_rename': case 'act_delete': case 'act_move':
+            return $mk('edit', book_of('acts', $P['id'] ?? 0));
+        case 'chapter_act':
+            return $mk('edit', book_of('chapters', $P['cid'] ?? 0));
+        case 'vision_delete':
+            return $mk('edit', book_of('vision_items', $P['id'] ?? 0));
+        case 'canvas_move_card': case 'canvas_text_card': case 'canvas_delete_card':
+            return $mk('edit', book_of('canvas_cards', $P['id'] ?? 0), true);
+        case 'canvas_delete_link':
+            return $mk('edit', book_of('canvas_links', $P['id'] ?? 0), true);
+        case 'chapter_note_to_task':                 // promotes a note into a task → write
+            return $mk('edit', book_of('chapter_notes', $P['id'] ?? 0));
+
+        /* --- comment (viewers may add/manage margin notes) --- */
+        case 'chapter_note_add':
+            return $mk('comment', $postbook);
+        case 'chapter_note_status': case 'chapter_note_delete':
+            return $mk('comment', book_of('chapter_notes', $P['id'] ?? 0));
+
+        /* --- owner-only: per-book membership & lifecycle --- */
+        case 'member_add': case 'member_role': case 'member_remove':
+        case 'member_invite': case 'member_revoke_invite':
+            return $mk('manage', $postbook);
+
+        default:
+            return null;   // not book-scoped
+    }
+}
+
 /* =========================================================== POST actions */
 $method = $_SERVER['REQUEST_METHOD'];
 if ($method === 'POST') {
     $a = $_POST['action'] ?? '';
     $book = $_POST['book'] ?? '';
+    // Phase 19: enforce the role matrix before any book-scoped mutation runs.
+    $__g = book_gate($a);
+    if ($__g !== null && !user_can($__g['book'], $__g['cap'])) {
+        if ($__g['json']) { header('Content-Type: application/json; charset=utf-8'); echo json_encode(['ok'=>false,'error'=>'permission denied']); exit; }
+        flash('You don’t have permission to do that in this book.', 'err');
+        redirect(user_can($book, 'view') && $book ? ['p'=>'book','book'=>$book] : ['p'=>'overview']);
+    }
     if (strpos($a, 'canvas_') === 0) {   // plot board AJAX (JSON in/out, same-origin session auth)
         header('Content-Type: application/json; charset=utf-8');
         if ($a === 'canvas_add_card')    { echo json_encode(['ok'=>true,'id'=>add_canvas_card($book,(int)($_POST['x']??40),(int)($_POST['y']??40),'',$_POST['color']??'#7c8cff')]); exit; }
@@ -72,6 +147,7 @@ if ($method === 'POST') {
         if (!$e['slug']) $e['slug'] = $slug;
         save_entry($book, $db, $e);
         rebuild_threads($book);
+        log_activity($book, 'entry_save', $db.'/'.$e['name']);
         flash('Saved “' . $e['name'] . '”.');
         redirect(['p'=>'entry','book'=>$book,'db'=>$db,'slug'=>$e['slug']]);
     }
@@ -97,6 +173,7 @@ if ($method === 'POST') {
     if ($a === 'entry_delete') {
         delete_entry($book, $_POST['db'], $_POST['slug']);
         rebuild_threads($book);
+        log_activity($book, 'entry_delete', $_POST['db'].'/'.$_POST['slug']);
         flash('Deleted entry.', 'ok');
         redirect(['p'=>'db','book'=>$book,'db'=>$_POST['db']]);
     }
@@ -172,6 +249,7 @@ if ($method === 'POST') {
     }
     if ($a === 'chapter_save') {                 // Phase 9: write chapter prose back to disk + DB
         $r = write_chapter_file($book, (int)($_POST['cid'] ?? 0), $_POST['md'] ?? '', $_POST['base'] ?? '');
+        if ($r['status'] === 'ok') { $cc = get_chapter((int)($_POST['cid'] ?? 0)); log_activity($book, 'chapter_save', $cc ? trim(($cc['num'].' '.$cc['title'])) : ''); }
         flash($r['msg'], $r['status'] === 'ok' ? 'ok' : 'err');
         if ($r['status'] === 'conflict' || $r['status'] === 'error')
             redirect(['p'=>'chapter_edit','book'=>$book,'id'=>$_POST['cid']]);
@@ -383,10 +461,48 @@ if ($method === 'POST') {
     }
     if ($a === 'vision_delete') { delete_vision((int)$_POST['id']); flash('Removed.'); redirect(['p'=>'vision','book'=>$book]); }
     if ($a === 'sync_import') {
+        if (!user_is_admin()) { flash('The snapshot import is restricted to administrators.', 'err'); redirect(['p'=>'sync']); }
         $snap = json_decode(file_get_contents($_FILES['file']['tmp_name']), true);
         if ($snap && isset($snap['books'])) { import_snapshot($snap); flash('Imported snapshot.'); }
         else flash('Could not read that file as a snapshot.', 'err');
         redirect(['p'=>'sync']);
+    }
+
+    /* ---- per-book membership management (Phase 19) — owner/admin only (gated) ---- */
+    if (strpos($a, 'member_') === 0) {
+        $base = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http') . '://' . ($_SERVER['HTTP_HOST'] ?? 'your-host') . $_SERVER['SCRIPT_NAME'];
+        $me = current_user_id();
+        if ($a === 'member_add') {
+            $u = find_user_by_email($_POST['email'] ?? '');
+            $role = $_POST['role'] ?? 'editor';
+            if (!$u) flash('No account with that email. Use “Invite to this book” to bring in someone new.', 'err');
+            else { add_book_member($book, (int)$u['id'], $role, $me); log_activity($book, 'member_add', $u['email'].' as '.$role); flash('Added '.$u['display_name'].' as '.$role.'.'); }
+            redirect(['p'=>'members','book'=>$book]);
+        }
+        if ($a === 'member_role') {
+            $uid = (int)($_POST['user_id'] ?? 0); $role = $_POST['role'] ?? 'editor'; $cur = get_user($uid);
+            if ($role !== 'owner' && $cur && user_book_role($uid, $book) === 'owner' && count_book_owners($book) <= 1)
+                flash('Cannot change the role of the only owner — add another owner first.', 'err');
+            else { add_book_member($book, $uid, $role, $me); log_activity($book, 'member_role', ($cur['email'] ?? $uid).' → '.$role); flash('Role updated.'); }
+            redirect(['p'=>'members','book'=>$book]);
+        }
+        if ($a === 'member_remove') {
+            $uid = (int)($_POST['user_id'] ?? 0); $cur = get_user($uid);
+            if (user_book_role($uid, $book) === 'owner' && count_book_owners($book) <= 1) flash('Cannot remove the only owner.', 'err');
+            else { remove_book_member($book, $uid); log_activity($book, 'member_remove', $cur['email'] ?? (string)$uid); flash('Member removed.'); }
+            redirect(['p'=>'members','book'=>$book]);
+        }
+        if ($a === 'member_invite') {
+            try {
+                $token = create_invite($_POST['email'] ?? '', $_POST['role'] ?? 'editor', 0, $me, 14, $book);
+                $_SESSION['__gen_link'] = ['Invite link for '.normalize_email($_POST['email'] ?? ''), $base.'?p=accept_invite&token='.$token];
+                log_activity($book, 'member_invite', normalize_email($_POST['email'] ?? '').' as '.($_POST['role'] ?? 'editor'));
+                flash('Invite created. Copy the link below and send it to them.');
+            } catch (Exception $ex) { flash($ex->getMessage(), 'err'); }
+            redirect(['p'=>'members','book'=>$book]);
+        }
+        if ($a === 'member_revoke_invite') { revoke_invite((int)($_POST['id'] ?? 0)); flash('Invite revoked.'); redirect(['p'=>'members','book'=>$book]); }
+        redirect(['p'=>'members','book'=>$book]);
     }
 
     /* ---- account: self-service (Phase 17) ---- */
@@ -466,7 +582,7 @@ $titles = ['overview'=>'Overview','library'=>'Library','book'=>$book['title']??'
            'threads'=>($book ? threads_label($book['profile'] ?? 'fiction')['title'] : 'Open threads'),
            'references'=>'References','exercises'=>'Exercises',
            'tasks'=>'Tasks','log'=>'Writing log','meta'=>'Meta','notes'=>'Notes','sync'=>'Sync','dictionary'=>'Dictionary',
-           'plot'=>'Plot board','vision'=>'Mood board','account'=>'Account','admin_users'=>'Users &amp; invites'];
+           'plot'=>'Plot board','vision'=>'Mood board','account'=>'Account','admin_users'=>'Users &amp; invites','members'=>'Members'];
 layout_head($titles[$p] ?? 'Codex', $accent, $bodyType, $density, $mode);
 echo '<div class="app">';
 render_sidebar($book, $p, $_GET['db'] ?? null);
@@ -604,12 +720,13 @@ case 'book':
     echo '<p class="desc"><strong>'.e($book['series']).' · Book '.e($book['num']).'</strong> — '.e($book['logline'] ?: 'No logline yet.').'</p></div></div>';
     echo '<div class="bt-stats" style="margin:6px 0 4px"><span><b>'.number_format($book['wordCount']).'</b> words</span><span><b>'.$book['chapterCount'].'</b> chapters</span><span><b>'.$book['entryCount'].'</b> entries</span><span><b>'.$book['threadCount'].'</b> open threads</span></div>';
     // Membership (Phase 18): who can access this shared book. Read-only here —
-    // inviting/changing roles per book arrives with the P19 member-management UI.
+    // Manage roles/invites on the Members page (Phase 19).
     $members = get_book_members($book['id']);
     if ($members) {
         $bits = [];
         foreach ($members as $mb) $bits[] = e($mb['display_name'] ?: $mb['email']).' <span class="muted">('.e($mb['role']).')</span>';
-        echo '<div class="bt-stats" style="margin:2px 0 4px"><span title="Everyone who can open this book">Shared with: '.implode(' · ', $bits).'</span></div>';
+        echo '<div class="bt-stats" style="margin:2px 0 4px"><span title="Everyone who can open this book">Shared with: '.implode(' · ', $bits)
+           . ' · <a href="'.url(['p'=>'members','book'=>$book['id']]).'">Manage</a></span></div>';
     }
     // Profile picker — selects the codex taxonomy (databases, field templates,
     // manuscript band labels, diagnostics) for this book. Fiction is the default.
@@ -2357,6 +2474,9 @@ case 'vision':
     break;
 
 case 'sync':
+    // Phase 19: the Sync page exposes the global REST token + snapshot import,
+    // so it is administrators-only until per-user MCP auth (P20) lands.
+    if (!user_is_admin()) { echo '<p class="empty">Sync &amp; the REST token are managed by administrators.</p>'; break; }
     $token = $CFG['api_token'];
     $base = (isset($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off'?'https':'http').'://'.($_SERVER['HTTP_HOST']??'your-host').dirname($_SERVER['SCRIPT_NAME']);
     echo '<div class="pagehead"><div><h1>Sync</h1><p class="desc">Two-way sync between this app and your Cowork book folders. A PowerShell scheduled task on your PC moves the data; the Claude skill runs flagged tasks and fills the writing log.</p></div></div>';
@@ -2444,6 +2564,77 @@ case 'admin_users':
         echo '</td></tr>';
     }
     echo '</tbody></table></div>';
+    break;
+
+case 'members':
+    // Phase 19: per-book membership. Any member sees the roster; owners (and
+    // admins) get the management controls. book_gate() protects the mutations.
+    $canManage = user_can($book['id'], 'manage');
+    $members = get_book_members($book['id']);
+    echo '<div class="pagehead"><div><h1>Members of “'.e($book['title']).'”</h1>'
+       . '<p class="desc">Who can open this book and what they can do. <strong>Owners</strong> manage members and can delete the book; <strong>editors</strong> read and write; <strong>viewers</strong> read and may leave comments.</p></div></div>';
+    if (!empty($_SESSION['__gen_link'])) {
+        [$lbl,$link] = $_SESSION['__gen_link']; unset($_SESSION['__gen_link']);
+        echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">'.e($lbl).'</h2>'
+           . '<p class="muted">Copy this link and send it to the recipient — it is shown only once.</p>'
+           . '<div class="fieldtable"><div class="row"><div class="v mono" style="word-break:break-all">'.e($link).'</div></div></div></div>';
+    }
+    $roleSel = function($name, $cur) {
+        $o = '';
+        foreach (['owner'=>'Owner','editor'=>'Editor','viewer'=>'Viewer'] as $rv=>$rl) $o .= '<option value="'.$rv.'"'.($rv===$cur?' selected':'').'>'.$rl.'</option>';
+        return '<select name="'.$name.'">'.$o.'</select>';
+    };
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Current members</h2>';
+    echo '<table class="grid"><thead><tr><th>Name</th><th>Email</th><th>Role</th>'.($canManage?'<th></th>':'').'</tr></thead><tbody>';
+    foreach ($members as $mb) {
+        echo '<tr><td>'.e($mb['display_name'] ?: '—').($mb['user_status']==='disabled'?' <span class="muted">(disabled)</span>':'').'</td><td class="mono">'.e($mb['email']).'</td>';
+        if ($canManage) {
+            echo '<td><form method="post" style="margin:0" onchange="this.submit()"><input type="hidden" name="action" value="member_role"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="user_id" value="'.(int)$mb['user_id'].'">'.$roleSel('role',$mb['role']).'</form></td>';
+            echo '<td><form method="post" style="margin:0" onsubmit="return confirm(\'Remove this member from the book?\')"><input type="hidden" name="action" value="member_remove"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="user_id" value="'.(int)$mb['user_id'].'"><button class="btn sm">Remove</button></form></td>';
+        } else {
+            echo '<td>'.e($mb['role']).'</td>';
+        }
+        echo '</tr>';
+    }
+    echo '</tbody></table></div>';
+    if ($canManage) {
+        echo '<div class="toolbar" style="align-items:flex-start">';
+        // add an existing account
+        echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">Add an existing member</summary>';
+        echo '<form method="post" style="margin-top:12px"><input type="hidden" name="action" value="member_add"><input type="hidden" name="book" value="'.e($book['id']).'">';
+        echo '<label class="f">Their account email</label><input type="email" name="email" required>';
+        echo '<label class="f" style="margin-top:8px">Role</label>'.$roleSel('role','editor');
+        echo '<div class="toolbar"><button class="btn primary">Add to book</button></div>';
+        echo '<p class="muted" style="font-size:12px">They must already have an account. To bring in someone new, use “Invite” instead.</p></form></details>';
+        // invite someone new to this book
+        echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">Invite someone new</summary>';
+        echo '<form method="post" style="margin-top:12px"><input type="hidden" name="action" value="member_invite"><input type="hidden" name="book" value="'.e($book['id']).'">';
+        echo '<label class="f">Email</label><input type="email" name="email" required>';
+        echo '<label class="f" style="margin-top:8px">Role</label>'.$roleSel('role','editor');
+        echo '<div class="toolbar"><button class="btn primary">Create invite link</button></div>';
+        echo '<p class="muted" style="font-size:12px">Generates a one-time link. Accepting it creates their account and adds them to this book at the chosen role.</p></form></details>';
+        echo '</div>';
+        // pending invites for this book
+        $pend = list_book_invites($book['id']);
+        if ($pend) {
+            echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Pending invites</h2><table class="grid"><thead><tr><th>Email</th><th>Role</th><th>Expires</th><th></th></tr></thead><tbody>';
+            foreach ($pend as $inv) {
+                $exp = $inv['expires_at'] ?? ''; $expd = $exp && $exp < date('Y-m-d H:i:s');
+                echo '<tr><td>'.e($inv['email']).'</td><td>'.e($inv['role']).'</td><td>'.e(substr((string)$exp,0,10)).($expd?' <span style="color:#A8485A">(expired)</span>':'').'</td>'
+                   . '<td><form method="post" style="margin:0"><input type="hidden" name="action" value="member_revoke_invite"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="id" value="'.(int)$inv['id'].'"><button class="btn sm">Revoke</button></form></td></tr>';
+            }
+            echo '</tbody></table></div>';
+        }
+    }
+    // recent activity (visible to any member)
+    $act = recent_activity($book['id'], 15);
+    if ($act) {
+        echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Recent activity</h2><table class="grid"><thead><tr><th>When</th><th>Who</th><th>What</th></tr></thead><tbody>';
+        foreach ($act as $ev) {
+            echo '<tr><td class="muted mono">'.e(substr((string)$ev['created_at'],0,16)).'</td><td>'.e($ev['display_name'] ?: ($ev['email'] ?: 'system')).'</td><td>'.e($ev['action']).($ev['detail']!==''?' <span class="muted">— '.e($ev['detail']).'</span>':'').'</td></tr>';
+        }
+        echo '</tbody></table></div>';
+    }
     break;
 
 default:
