@@ -318,4 +318,18 @@ CREATE TABLE IF NOT EXISTS password_resets (
   UNIQUE KEY uniq_reset_token (token)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- book_members (Phase 18, Track E) — the unit of ownership is the book, not the
+-- user. A shared book has one+ owners plus editors/viewers; the web library is
+-- scoped to the caller's memberships (admins & the token API see everything).
+CREATE TABLE IF NOT EXISTS book_members (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  book_id     VARCHAR(40)  NOT NULL,
+  user_id     INT          NOT NULL,
+  role        VARCHAR(20)  DEFAULT 'editor',        -- owner|editor|viewer
+  added_by    INT          DEFAULT NULL,
+  created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_book_member (book_id, user_id),
+  KEY k_member_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;

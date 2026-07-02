@@ -148,7 +148,10 @@ function run_auth_gate() {
     }
 
     $u = current_user();
-    if ($u) return $u;   // authenticated — hand control back to the app
+    if ($u) {
+        backfill_book_members();   // Phase 18: hand any member-less book to admin #1 (runs before this request's creates)
+        return $u;                 // authenticated — hand control back to the app
+    }
 
     $inner = auth_flash_err($err)
         . '<form method="post">'

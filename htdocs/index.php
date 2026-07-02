@@ -453,7 +453,12 @@ if ($method === 'POST') {
 $p = $_GET['p'] ?? 'overview';
 $book_id = $_GET['book'] ?? null;
 $book = $book_id ? get_book($book_id) : null;
-if (!$book && !in_array($p, ['library','sync','overview','account','admin_users'], true)) { $bks = get_books(); $book = $bks[0] ?? null; $book_id = $book['id'] ?? null; }
+$bookScoped = !in_array($p, ['library','sync','overview','account','admin_users'], true);
+if (!$book && $bookScoped) { $bks = get_books(); $book = $bks[0] ?? null; $book_id = $book['id'] ?? null; }
+// A book-scoped page with no accessible book (e.g. a member requested a book they
+// can't see, or has none yet) — send them to the library rather than render an
+// empty shell. Phase 18: get_book() already returns null for non-members.
+if (!$book && $bookScoped) redirect(['p'=>'library']);
 $GLOBALS['__link_book'] = $book_id;
 
 $titles = ['overview'=>'Overview','library'=>'Library','book'=>$book['title']??'Book','db'=>'Database','entry'=>'Entry',
@@ -598,6 +603,14 @@ case 'book':
     echo '<div class="pagehead"><div><h1>'.e($book['title']).'</h1>';
     echo '<p class="desc"><strong>'.e($book['series']).' · Book '.e($book['num']).'</strong> — '.e($book['logline'] ?: 'No logline yet.').'</p></div></div>';
     echo '<div class="bt-stats" style="margin:6px 0 4px"><span><b>'.number_format($book['wordCount']).'</b> words</span><span><b>'.$book['chapterCount'].'</b> chapters</span><span><b>'.$book['entryCount'].'</b> entries</span><span><b>'.$book['threadCount'].'</b> open threads</span></div>';
+    // Membership (Phase 18): who can access this shared book. Read-only here —
+    // inviting/changing roles per book arrives with the P19 member-management UI.
+    $members = get_book_members($book['id']);
+    if ($members) {
+        $bits = [];
+        foreach ($members as $mb) $bits[] = e($mb['display_name'] ?: $mb['email']).' <span class="muted">('.e($mb['role']).')</span>';
+        echo '<div class="bt-stats" style="margin:2px 0 4px"><span title="Everyone who can open this book">Shared with: '.implode(' · ', $bits).'</span></div>';
+    }
     // Profile picker — selects the codex taxonomy (databases, field templates,
     // manuscript band labels, diagnostics) for this book. Fiction is the default.
     echo '<form method="post" class="profileform" style="margin:10px 0 2px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">'

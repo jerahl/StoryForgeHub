@@ -237,3 +237,100 @@ function consume_password_reset($token, $password) {
     q("UPDATE password_resets SET used_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$r['id']]);
     return (int)$r['user_id'];
 }
+
+/* =====================================================================
+   Book membership & library scoping (Phase 18, Track E)
+
+   The unit of ownership is the *book*, not the user: a shared book has an
+   owner plus any editors/viewers, expressed as rows in `book_members`. The
+   web library is scoped to the caller's memberships; the token REST API and
+   CLI (no session user) stay unscoped — per-user MCP auth is P20.
+   ===================================================================== */
+
+/** Lazy-migration for the membership join. Table + indexes only — the backfill is
+ *  deliberately kept OUT of here so it never runs on the create path (which would
+ *  grab a book between its row insert and its owner row). */
+function ensure_book_members() {
+    static $done = false; if ($done) return; $done = true;
+    ensure_users();
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec(
+        "CREATE TABLE IF NOT EXISTS book_members (
+            id $pk,
+            book_id VARCHAR(40) NOT NULL,
+            user_id INT NOT NULL,
+            role VARCHAR(20) DEFAULT 'editor',
+            added_by INT DEFAULT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"
+    ); } catch (Exception $e) {}
+    try { db()->exec("CREATE UNIQUE INDEX uniq_book_member ON book_members (book_id, user_id)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_member_user ON book_members (user_id)"); } catch (Exception $e) {}
+}
+
+/**
+ * Assign every member-less book to the earliest active admin as owner. This is the
+ * upgrade path that makes the existing installation own its pre-P18 books, plus a
+ * safety net for books created by the token API / CLI (which have no session user).
+ *
+ * Called once per request from the auth gate — BEFORE any create/import in the same
+ * request — so a book being created now (its owner row written later this request)
+ * is never mistaken for an orphan. Idempotent: only touches books with zero members.
+ */
+function backfill_book_members() {
+    static $done = false; if ($done) return;
+    ensure_book_members();
+    $adminId = val("SELECT id FROM users WHERE is_admin=1 AND status='active' ORDER BY id LIMIT 1");
+    if (!$adminId) return;   // no admin yet — retry on a later request
+    $done = true;
+    $orphans = [];
+    try { $orphans = all("SELECT b.id FROM books b LEFT JOIN book_members m ON m.book_id=b.id WHERE m.id IS NULL"); }
+    catch (Exception $e) { $done = false; return; }   // books table may not exist yet on a truly empty box
+    foreach ($orphans as $o) add_book_member($o['id'], (int)$adminId, 'owner', (int)$adminId);
+}
+
+/** Add or update a membership (unique per book+user). Returns nothing. */
+function add_book_member($book_id, $user_id, $role = 'editor', $added_by = null) {
+    ensure_book_members();
+    $role = in_array($role, ['owner','editor','viewer'], true) ? $role : 'editor';
+    $ex = one("SELECT id FROM book_members WHERE book_id=? AND user_id=?", [$book_id, (int)$user_id]);
+    if ($ex) q("UPDATE book_members SET role=? WHERE id=?", [$role, (int)$ex['id']]);
+    else     q("INSERT INTO book_members (book_id, user_id, role, added_by) VALUES (?,?,?,?)",
+               [$book_id, (int)$user_id, $role, $added_by !== null ? (int)$added_by : null]);
+}
+function remove_book_member($book_id, $user_id) {
+    ensure_book_members();
+    q("DELETE FROM book_members WHERE book_id=? AND user_id=?", [$book_id, (int)$user_id]);
+}
+function get_book_members($book_id) {
+    ensure_book_members();
+    return all("SELECT m.*, u.email, u.display_name, u.status AS user_status
+                FROM book_members m JOIN users u ON u.id=m.user_id
+                WHERE m.book_id=?
+                ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'editor' THEN 1 ELSE 2 END, LOWER(u.display_name)",
+               [$book_id]);
+}
+function count_book_owners($book_id) {
+    ensure_book_members();
+    return (int) val("SELECT COUNT(*) FROM book_members WHERE book_id=? AND role='owner'", [$book_id]);
+}
+/** The caller's role on a book ('owner'|'editor'|'viewer'), or null if not a member. */
+function user_book_role($user_id, $book_id) {
+    ensure_book_members();
+    return val("SELECT role FROM book_members WHERE book_id=? AND user_id=?", [$book_id, (int)$user_id]);
+}
+function user_can_view_book($user_id, $book_id) {
+    if ($user_id === null) return true;   // unscoped context (token API / CLI)
+    return user_book_role($user_id, $book_id) !== null;
+}
+
+/**
+ * The user id the library should be scoped to, or null for an unscoped view.
+ * Null when: no session user (token API / CLI), or the caller is an admin —
+ * admins operate the instance and see every book.
+ */
+function book_scope_uid() {
+    $uid = current_user_id();
+    if ($uid === null) return null;        // token API / CLI → full access
+    if (user_is_admin()) return null;      // admins see everything
+    return $uid;
+}

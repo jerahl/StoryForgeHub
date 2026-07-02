@@ -15,14 +15,24 @@ function ensure_book_profile() {
 }
 function get_books() {
     ensure_book_profile();
-    $rows = all("SELECT * FROM books ORDER BY sort_order, title");
+    $uid = book_scope_uid();   // Phase 18: scope the library to the caller's memberships
+    if ($uid !== null) {
+        ensure_book_members();
+        $rows = all("SELECT b.* FROM books b JOIN book_members m ON m.book_id=b.id AND m.user_id=?
+                     ORDER BY b.sort_order, b.title", [$uid]);
+    } else {
+        $rows = all("SELECT * FROM books ORDER BY sort_order, title");
+    }
     foreach ($rows as &$b) $b = decorate_book($b);
     return $rows;
 }
 function get_book($id) {
     ensure_book_profile();
     $b = one("SELECT * FROM books WHERE id=?", [$id]);
-    return $b ? decorate_book($b) : null;
+    if (!$b) return null;
+    $uid = book_scope_uid();   // Phase 18: a user may only load books they're a member of
+    if ($uid !== null && !user_can_view_book($uid, $id)) return null;
+    return decorate_book($b);
 }
 /** Raw profile id for a book (default 'fiction'). Cheap; used where only the
  *  profile is needed (e.g. the POST handlers that work from a book id string). */
@@ -195,7 +205,7 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
 
     $rel = ltrim(str_replace('\\', '/', (string)$c['file']), '/');
     if ($rel === '' || strpos($rel, '..') !== false) return ['status'=>'error', 'msg'=>'Bad chapter path.'];
-    $path = rtrim($books, '/').'/'.$b['folder'].'/Manuscript/'.$rel;
+    $path = book_root($b).'/Manuscript/'.$rel;
 
     $new_md = md_body_norm($new_md);
     $dbBody = md_body_norm($c['body']);
@@ -237,6 +247,19 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
  *  projection, so New/Import are disabled. */
 function books_dir_set() { return (cfg()['books_dir'] ?? '') !== ''; }
 
+/** On-disk root for a single book, resolved from the book row (Phase 18). One
+ *  directory per book — currently <books_dir>/<folder>; centralized here so a
+ *  future <books_dir>/<id> relocation is a one-line change, not a callsite hunt.
+ *  Returns null when the books root isn't configured. $book may be a row or id. */
+function book_root($book) {
+    $books = cfg()['books_dir'] ?? '';
+    if ($books === '') return null;
+    if (!is_array($book)) $book = one("SELECT folder FROM books WHERE id=?", [$book]);
+    $folder = $book['folder'] ?? '';
+    if ($folder === '') return null;
+    return rtrim($books, '/') . '/' . $folder;
+}
+
 /** slug for a book folder / id or a chapter filename base: lowercase, ascii, dashes. */
 function slugify_folder($s) {
     $s = strtolower(trim((string)$s));
@@ -251,7 +274,7 @@ function manuscript_path($book, $rel) {
     if (!$books) return [null, 'Chapter files are disabled (CODEX_BOOKS_DIR not set).'];
     $rel = ltrim(str_replace('\\', '/', (string)$rel), '/');
     if (strpos($rel, '..') !== false) return [null, 'Bad chapter path.'];
-    return [rtrim($books, '/').'/'.$book['folder'].'/Manuscript/'.$rel, null];
+    return [book_root($book).'/Manuscript/'.$rel, null];
 }
 
 /** Physical prose writer shared by chapter editing (P9) and create/import: mkdir
@@ -403,6 +426,9 @@ function create_book($f) {
         'sort_order'=>(int) val("SELECT COALESCE(MAX(sort_order),-1)+1 FROM books", []),
         'profile'=>$profile,
     ]);
+    // Phase 18: the creator owns the book they just made (skipped in CLI/token
+    // contexts, where backfill assigns orphaned books to the admin instead).
+    if (function_exists('current_user_id') && ($uid = current_user_id())) add_book_member($id, $uid, 'owner', $uid);
     return ['status'=>'ok', 'msg'=>'Created book “'.$title.'”.', 'id'=>$id];
 }
 
@@ -488,6 +514,8 @@ function import_book_zip($zip_path, $opts = []) {
         'files'  => $payload,
         'manuscript_present' => $present,
     ]]]);
+    // Phase 18: whoever imported the book owns it (CLI/token imports fall to backfill).
+    if (function_exists('current_user_id') && ($uid = current_user_id())) add_book_member($id, $uid, 'owner', $uid);
     return ['status'=>'ok', 'msg'=>'Imported book “'.$title.'” — '.count($payload).' files ('.($report['chapters'] ?? 0).' chapters, '.($report['entries'] ?? 0).' entries).', 'id'=>$id, 'report'=>$report];
 }
 

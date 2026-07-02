@@ -124,3 +124,8 @@ because a copy lives at `projects/books/.claude/skills/codex-webapp-sync/`.
   and update the sync client's token to match.
 - **Accounts, invites & resets** (Phase 17) live under **Users & invites** (admins only) and
   **Account** (everyone). Onboarding is invite-only — no public registration endpoint exists.
+- **Book ownership & scoping** (Phase 18): the unit of ownership is the *book*, not the user —
+  a `book_members` row (owner/editor/viewer) says who can touch which book. The web library
+  shows each member exactly the books they belong to; creating or importing a book makes you
+  its owner. Admins and the token REST API see every book (per-user MCP auth is a later phase).
+  On upgrade, your existing books are backfilled to the first admin as owner.
