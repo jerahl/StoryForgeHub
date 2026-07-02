@@ -209,11 +209,16 @@ function render_sidebar($book, $active, $activeDb = null) {
       <a class="navitem <?= $active==='vision'?'active':'' ?>" href="<?=url(['p'=>'vision','book'=>$bid])?>"><span class="dot" style="background:#c98ad6"></span>Mood board</a>
       <a class="navitem <?= $active==='meta'?'active':'' ?>" href="<?=url(['p'=>'meta','book'=>$bid])?>"><span class="dot" style="background:#7A715F"></span>Meta</a>
       <a class="navitem <?= $active==='notes'?'active':'' ?>" href="<?=url(['p'=>'notes','book'=>$bid])?>"><span class="dot" style="background:#6E8A6A"></span>Notes</a>
+      <a class="navitem <?= $active==='members'?'active':'' ?>" href="<?=url(['p'=>'members','book'=>$bid])?>"><span class="dot" style="background:#5E8CA8"></span>Members</a>
       <?php endif ?>
 
       <div class="navgroup">System</div>
       <?php $syncp = ['p'=>'sync']; if ($book) $syncp['book'] = $book['id']; ?>
       <a class="navitem <?= $active==='sync'?'active':'' ?>" href="<?=url($syncp)?>"><span class="dot" style="background:#3D7D80"></span>Sync</a>
+      <a class="navitem <?= $active==='account'?'active':'' ?>" href="<?=url(['p'=>'account'])?>"><span class="dot" style="background:#6E8A6A"></span>Account</a>
+      <?php if (function_exists('user_is_admin') && user_is_admin()): ?>
+      <a class="navitem <?= $active==='admin_users'?'active':'' ?>" href="<?=url(['p'=>'admin_users'])?>"><span class="dot" style="background:#C25A6E"></span>Users &amp; invites</a>
+      <?php endif ?>
 
       <div class="side-foot">
         <button type="button" class="sprint-start" onclick="openSprint(<?=htmlspecialchars(json_encode((string)($book['id'] ?? '')), ENT_QUOTES, 'UTF-8')?>, <?=htmlspecialchars(json_encode((string)($book['title'] ?? '')), ENT_QUOTES, 'UTF-8')?>)">&#9654; Start a writing sprint</button>
@@ -254,6 +259,16 @@ function render_topbar($book, $crumbs, $accent, $bodyType, $density, $mode = 'Li
         <input type="text" name="text" placeholder="Brain dump — capture it, triage later" autocomplete="off">
         <button class="btn primary sm" type="submit">Capture</button>
       </form>
+      <?php $me = function_exists('current_user') ? current_user() : null; if ($me): ?>
+      <details class="acctmenu">
+        <summary title="<?=e($me['email'])?>"><?=e($me['display_name'] ?: $me['email'])?></summary>
+        <div class="acctmenu-pop">
+          <a href="<?=url(['p'=>'account'])?>">Account</a>
+          <?php if (function_exists('user_is_admin') && user_is_admin()): ?><a href="<?=url(['p'=>'admin_users'])?>">Users &amp; invites</a><?php endif ?>
+          <form method="post" style="margin:0"><input type="hidden" name="action" value="auth_logout"><button type="submit">Sign out</button></form>
+        </div>
+      </details>
+      <?php endif ?>
     </div><?php
 }
 
