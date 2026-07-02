@@ -27,7 +27,10 @@ return [
     // X-Codex-Token header (or ?token=...). Set the API_KEY secret on Edge.
     'api_token' => $env('API_KEY', ''),
 
-    // --- Optional UI login (single shared password). Empty = disabled. ---
+    // --- First-run bootstrap gate (Phase 17). The UI now uses real per-user
+    // accounts + invites; this is only the secret that whoever creates the
+    // first admin account must know on a live install. Unused once admin #1
+    // exists. Empty on a brand-new box = the first-admin setup is ungated. ---
     'app_password' => $env('APP_PASSWORD', ''),
 
     // --- Display defaults (overridable per session in the UI) ---

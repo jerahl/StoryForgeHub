@@ -279,4 +279,43 @@ CREATE TABLE IF NOT EXISTS exercises (
   KEY k_ex_book (book_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- users (Phase 17, Track E) — real accounts replace the single shared password.
+CREATE TABLE IF NOT EXISTS users (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  email         VARCHAR(190) NOT NULL,
+  display_name  VARCHAR(160) DEFAULT '',
+  password_hash VARCHAR(255) DEFAULT '',
+  status        VARCHAR(20)  DEFAULT 'active',        -- active|disabled
+  is_admin      INT          DEFAULT 0,
+  created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at  DATETIME     DEFAULT NULL,
+  UNIQUE KEY uniq_user_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- invites (Phase 17) — invite-only onboarding; no public signup endpoint exists.
+CREATE TABLE IF NOT EXISTS invites (
+  id               INT AUTO_INCREMENT PRIMARY KEY,
+  email            VARCHAR(190) DEFAULT '',
+  token            VARCHAR(64)  NOT NULL,
+  role             VARCHAR(20)  DEFAULT 'editor',      -- intended per-book role (used by P18/P19)
+  is_admin         INT          DEFAULT 0,
+  invited_by       INT          DEFAULT NULL,
+  created_at       DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  expires_at       DATETIME     DEFAULT NULL,
+  accepted_at      DATETIME     DEFAULT NULL,
+  accepted_user_id INT          DEFAULT NULL,
+  UNIQUE KEY uniq_invite_token (token)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- password_resets (Phase 17) — admin-issued, single-use, link-based reset.
+CREATE TABLE IF NOT EXISTS password_resets (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  user_id     INT          NOT NULL,
+  token       VARCHAR(64)  NOT NULL,
+  created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  expires_at  DATETIME     DEFAULT NULL,
+  used_at     DATETIME     DEFAULT NULL,
+  UNIQUE KEY uniq_reset_token (token)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;

@@ -1,26 +1,21 @@
 <?php
 /** index.php — Stephen's Codex web app (front controller). */
-session_start();
-require_once dirname(__DIR__) . '/src/layout.php';  // src/ lives above the docroot
+// Harden the session cookie before it is issued (HttpOnly + SameSite always;
+// Secure whenever the request arrived over TLS). Phase 17.
+if (session_status() !== PHP_SESSION_ACTIVE) {
+    $__secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+    session_set_cookie_params(['lifetime'=>0,'path'=>'/','httponly'=>true,'secure'=>$__secure,'samesite'=>'Lax']);
+    session_start();
+}
+require_once dirname(__DIR__) . '/src/layout.php';      // src/ lives above the docroot
+require_once dirname(__DIR__) . '/src/auth_pages.php';  // Phase 17 accounts gate + screens
 
 $CFG = cfg();
 
-/* ---- optional shared-password gate ---- */
-if (!empty($CFG['app_password'])) {
-    if (isset($_POST['__login'])) {
-        if (hash_equals($CFG['app_password'], (string)$_POST['password'])) { $_SESSION['auth'] = 1; header('Location: ?'); exit; }
-        $login_err = 'Wrong password.';
-    }
-    if (empty($_SESSION['auth'])) {
-        layout_head('Sign in', $CFG['accent'], $CFG['bodyType'], $CFG['density'], $_COOKIE['mode'] ?? ($CFG['mode'] ?? 'Beacon'));
-        echo '<div class="content" style="max-width:360px;margin:8vh auto">';
-        echo '<h1>Stephen\'s Codex</h1>';
-        if (!empty($login_err)) echo '<div class="flash err">'.e($login_err).'</div>';
-        echo '<form method="post"><label class="f">Password</label><input type="password" name="password" autofocus>'
-           . '<input type="hidden" name="__login" value="1"><div class="toolbar"><button class="btn primary">Sign in</button></div></form>';
-        echo '</div>'; layout_foot(); exit;
-    }
-}
+/* ---- accounts & invites gate (Phase 17) — replaces the shared password ----
+   Renders login / first-run setup / accept-invite / reset screens and exits
+   when the request isn't authenticated; otherwise returns the current user. */
+$user = run_auth_gate();
 
 /* ---- theme (persist via cookie) ---- */
 foreach (['accent','bodyType','density','mode'] as $tk) {
@@ -393,6 +388,64 @@ if ($method === 'POST') {
         else flash('Could not read that file as a snapshot.', 'err');
         redirect(['p'=>'sync']);
     }
+
+    /* ---- account: self-service (Phase 17) ---- */
+    if ($a === 'account_update') {
+        set_user_display_name(current_user_id(), $_POST['display_name'] ?? '');
+        flash('Profile updated.');
+        redirect(['p'=>'account']);
+    }
+    if ($a === 'account_password') {
+        $me = current_user();
+        if (!password_verify((string)($_POST['current'] ?? ''), $me['password_hash'])) flash('Current password is incorrect.', 'err');
+        elseif ($err = password_problem($_POST['password'] ?? '')) flash($err, 'err');
+        elseif (($_POST['password'] ?? '') !== ($_POST['password2'] ?? '')) flash('The two passwords do not match.', 'err');
+        else { set_user_password((int)$me['id'], $_POST['password']); flash('Password changed.'); }
+        redirect(['p'=>'account']);
+    }
+
+    /* ---- admin: users & invites (Phase 17) ---- */
+    if (strpos($a, 'admin_') === 0) {
+        if (!user_is_admin()) { flash('Admins only.', 'err'); redirect(['p'=>'overview']); }
+        $me = current_user_id();
+        $base = (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https' : 'http') . '://' . ($_SERVER['HTTP_HOST'] ?? 'your-host') . $_SERVER['SCRIPT_NAME'];
+        if ($a === 'admin_invite') {
+            try {
+                $token = create_invite($_POST['email'] ?? '', $_POST['role'] ?? 'editor', isset($_POST['is_admin']), $me);
+                $_SESSION['__gen_link'] = ['Invite link for ' . normalize_email($_POST['email'] ?? ''), $base . '?p=accept_invite&token=' . $token];
+                flash('Invite created. Copy the link below and send it to them.');
+            } catch (Exception $ex) { flash($ex->getMessage(), 'err'); }
+            redirect(['p'=>'admin_users']);
+        }
+        if ($a === 'admin_revoke_invite') { revoke_invite((int)($_POST['id'] ?? 0)); flash('Invite revoked.'); redirect(['p'=>'admin_users']); }
+        if ($a === 'admin_user_reset') {
+            $uid = (int)($_POST['id'] ?? 0); $u = get_user($uid);
+            if ($u) { $token = create_password_reset($uid); $_SESSION['__gen_link'] = ['Password reset link for ' . $u['email'], $base . '?p=reset_password&token=' . $token]; flash('Reset link created. Copy it below and send it to them.'); }
+            redirect(['p'=>'admin_users']);
+        }
+        if ($a === 'admin_user_status') {
+            $uid = (int)($_POST['id'] ?? 0); $to = $_POST['status'] ?? 'active';
+            if ($to === 'disabled' && get_user($uid)['is_admin'] && count_active_admins() <= 1) flash('Cannot disable the last active admin.', 'err');
+            elseif ($uid === $me && $to === 'disabled') flash('You cannot disable your own account.', 'err');
+            else { set_user_status($uid, $to); flash('User updated.'); }
+            redirect(['p'=>'admin_users']);
+        }
+        if ($a === 'admin_user_admin') {
+            $uid = (int)($_POST['id'] ?? 0); $to = isset($_POST['is_admin']) ? 1 : 0;
+            if (!$to && get_user($uid)['is_admin'] && count_active_admins() <= 1) flash('Cannot remove the last active admin.', 'err');
+            else { set_user_admin($uid, $to); flash('User updated.'); }
+            redirect(['p'=>'admin_users']);
+        }
+        if ($a === 'admin_user_delete') {
+            $uid = (int)($_POST['id'] ?? 0); $u = get_user($uid);
+            if ($uid === $me) flash('You cannot delete your own account.', 'err');
+            elseif ($u && $u['is_admin'] && count_active_admins() <= 1) flash('Cannot delete the last active admin.', 'err');
+            else { delete_user($uid); flash('User deleted.'); }
+            redirect(['p'=>'admin_users']);
+        }
+        redirect(['p'=>'admin_users']);
+    }
+
     redirect(['p'=>'library']);
 }
 
@@ -400,7 +453,7 @@ if ($method === 'POST') {
 $p = $_GET['p'] ?? 'overview';
 $book_id = $_GET['book'] ?? null;
 $book = $book_id ? get_book($book_id) : null;
-if (!$book && !in_array($p, ['library','sync','overview'], true)) { $bks = get_books(); $book = $bks[0] ?? null; $book_id = $book['id'] ?? null; }
+if (!$book && !in_array($p, ['library','sync','overview','account','admin_users'], true)) { $bks = get_books(); $book = $bks[0] ?? null; $book_id = $book['id'] ?? null; }
 $GLOBALS['__link_book'] = $book_id;
 
 $titles = ['overview'=>'Overview','library'=>'Library','book'=>$book['title']??'Book','db'=>'Database','entry'=>'Entry',
@@ -408,7 +461,7 @@ $titles = ['overview'=>'Overview','library'=>'Library','book'=>$book['title']??'
            'threads'=>($book ? threads_label($book['profile'] ?? 'fiction')['title'] : 'Open threads'),
            'references'=>'References','exercises'=>'Exercises',
            'tasks'=>'Tasks','log'=>'Writing log','meta'=>'Meta','notes'=>'Notes','sync'=>'Sync','dictionary'=>'Dictionary',
-           'plot'=>'Plot board','vision'=>'Mood board'];
+           'plot'=>'Plot board','vision'=>'Mood board','account'=>'Account','admin_users'=>'Users &amp; invites'];
 layout_head($titles[$p] ?? 'Codex', $accent, $bodyType, $density, $mode);
 echo '<div class="app">';
 render_sidebar($book, $p, $_GET['db'] ?? null);
@@ -2306,6 +2359,78 @@ case 'sync':
     echo '<p class="muted">No automation yet? Import a snapshot.json produced by the sync skill, or grab the current data as a snapshot.</p>';
     echo '<form method="post" enctype="multipart/form-data"><input type="hidden" name="action" value="sync_import"><input type="file" name="file" accept=".json" style="width:auto;display:inline-block"> <button class="btn">Import snapshot.json</button></form>';
     echo '<div class="toolbar"><a class="btn" href="api.php?action=export&token='.e($token).'" target="_blank">Download current snapshot.json</a></div></div>';
+    break;
+
+case 'account':
+    $me = current_user();
+    echo '<div class="pagehead"><div><h1>Account</h1><p class="desc">Your sign-in details for Stephen\'s Codex.</p></div>'
+       . '<form method="post" style="margin:0"><input type="hidden" name="action" value="auth_logout"><button class="btn">Sign out</button></form></div>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Profile</h2>';
+    echo '<div class="fieldtable"><div class="row"><div class="lbl">Email</div><div class="v mono">'.e($me['email']).'</div></div>';
+    echo '<div class="row"><div class="lbl">Role</div><div class="v">'.($me['is_admin']?'Administrator':'Member').'</div></div></div>';
+    echo '<form method="post" style="margin-top:12px"><input type="hidden" name="action" value="account_update">'
+       . '<label class="f">Display name</label><input type="text" name="display_name" value="'.e($me['display_name']).'">'
+       . '<div class="toolbar"><button class="btn primary">Save</button></div></form></div>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Change password</h2>';
+    echo '<form method="post"><input type="hidden" name="action" value="account_password">'
+       . '<label class="f">Current password</label><input type="password" name="current" required>'
+       . '<label class="f">New password</label><input type="password" name="password" required>'
+       . '<label class="f">Confirm new password</label><input type="password" name="password2" required>'
+       . '<div class="toolbar"><button class="btn primary">Update password</button></div></form></div>';
+    break;
+
+case 'admin_users':
+    if (!user_is_admin()) { echo '<p class="empty">Administrators only.</p>'; break; }
+    $meId = current_user_id();
+    echo '<div class="pagehead"><div><h1>Users &amp; invites</h1><p class="desc">Invite-only accounts. Everyone here can sign in; roles for individual books arrive in a later phase.</p></div></div>';
+    // A freshly generated invite / reset link (shown once, right after creation).
+    if (!empty($_SESSION['__gen_link'])) {
+        [$lbl,$link] = $_SESSION['__gen_link']; unset($_SESSION['__gen_link']);
+        echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">'.e($lbl).'</h2>'
+           . '<p class="muted">Copy this link and send it to the recipient — it is shown only once.</p>'
+           . '<div class="fieldtable"><div class="row"><div class="v mono" style="word-break:break-all">'.e($link).'</div></div></div></div>';
+    }
+    // Invite form
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Invite someone</h2>';
+    echo '<form method="post"><input type="hidden" name="action" value="admin_invite">';
+    echo '<div class="formrow"><div><label class="f">Email</label><input type="email" name="email" required></div>';
+    echo '<div><label class="f">Book role (default for shared books)</label><select name="role">';
+    foreach (['editor'=>'Editor','viewer'=>'Viewer','owner'=>'Owner'] as $rv=>$rl) echo '<option value="'.$rv.'">'.$rl.'</option>';
+    echo '</select></div></div>';
+    echo '<label class="f" style="display:flex;align-items:center;gap:6px;margin-top:8px"><input type="checkbox" name="is_admin" value="1" style="width:auto"> Make this person an administrator</label>';
+    echo '<div class="toolbar"><button class="btn primary">Create invite link</button></div></form></div>';
+    // Pending invites
+    $pending = list_invites(true);
+    if ($pending) {
+        echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Pending invites</h2><table class="grid"><thead><tr><th>Email</th><th>Role</th><th>Expires</th><th></th></tr></thead><tbody>';
+        foreach ($pending as $inv) {
+            $exp = $inv['expires_at'] ?? '';
+            $expired = $exp && $exp < date('Y-m-d H:i:s');
+            echo '<tr><td>'.e($inv['email']).'</td><td>'.e($inv['role']).($inv['is_admin']?' · admin':'').'</td>'
+               . '<td>'.e(substr((string)$exp,0,10)).($expired?' <span style="color:#A8485A">(expired)</span>':'').'</td>'
+               . '<td><form method="post" style="margin:0"><input type="hidden" name="action" value="admin_revoke_invite"><input type="hidden" name="id" value="'.(int)$inv['id'].'"><button class="btn sm">Revoke</button></form></td></tr>';
+        }
+        echo '</tbody></table></div>';
+    }
+    // Existing users
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Accounts</h2><table class="grid"><thead><tr><th>Name</th><th>Email</th><th>Admin</th><th>Status</th><th>Last seen</th><th></th></tr></thead><tbody>';
+    foreach (list_users() as $u) {
+        $uid = (int)$u['id']; $self = $uid === $meId;
+        echo '<tr><td>'.e($u['display_name']).($self?' <span class="muted">(you)</span>':'').'</td><td class="mono">'.e($u['email']).'</td>';
+        // admin toggle
+        echo '<td><form method="post" style="margin:0" onchange="this.submit()"><input type="hidden" name="action" value="admin_user_admin"><input type="hidden" name="id" value="'.$uid.'">'
+           . '<label style="display:inline-flex;align-items:center;gap:4px"><input type="checkbox" name="is_admin" value="1"'.($u['is_admin']?' checked':'').' style="width:auto"> admin</label></form></td>';
+        // status toggle
+        $next = $u['status']==='active' ? 'disabled' : 'active';
+        echo '<td>'.e($u['status']).'</td>';
+        echo '<td class="muted">'.e($u['last_seen_at'] ? substr($u['last_seen_at'],0,16) : '—').'</td>';
+        echo '<td style="white-space:nowrap">';
+        echo '<form method="post" style="display:inline-block;margin:0 4px 0 0"><input type="hidden" name="action" value="admin_user_reset"><input type="hidden" name="id" value="'.$uid.'"><button class="btn sm">Reset link</button></form>';
+        echo '<form method="post" style="display:inline-block;margin:0 4px 0 0"><input type="hidden" name="action" value="admin_user_status"><input type="hidden" name="id" value="'.$uid.'"><input type="hidden" name="status" value="'.e($next).'"><button class="btn sm">'.($next==='disabled'?'Disable':'Enable').'</button></form>';
+        if (!$self) echo '<form method="post" style="display:inline-block;margin:0" onsubmit="return confirm(\'Delete this account?\')"><input type="hidden" name="action" value="admin_user_delete"><input type="hidden" name="id" value="'.$uid.'"><button class="btn sm">Delete</button></form>';
+        echo '</td></tr>';
+    }
+    echo '</tbody></table></div>';
     break;
 
 default:

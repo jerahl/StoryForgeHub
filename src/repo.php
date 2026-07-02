@@ -3,6 +3,7 @@
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/md.php';
 require_once __DIR__ . '/profiles.php';   // book profiles (Phase 10): db sets, templates, band labels
+require_once __DIR__ . '/auth.php';       // accounts, sessions, invites (Phase 17)
 
 /* ----------------------------------------------------------------- books */
 /** Lazy-migration for the Phase 10 book profile. Additive column; existing books
