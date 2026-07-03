@@ -611,3 +611,17 @@ a.mention-lore{border-bottom-color:#7A5AA0}a.mention-lore:hover{color:#a07cc8;bo
 .mc-open:hover{text-decoration:underline}
 /* centered manuscript column for reading/writing */
 .chaptermain .chapterbody{max-width:46rem}
+
+/* account menu in the topbar (Phase 17) */
+.acctmenu{position:relative;flex:none}
+.acctmenu>summary{list-style:none;cursor:pointer;font-size:13px;font-weight:600;color:var(--muted);
+  border:1px solid var(--line2);background:var(--panel);border-radius:8px;padding:6px 12px;max-width:180px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.acctmenu>summary::-webkit-details-marker{display:none}
+.acctmenu[open]>summary{color:var(--ink);border-color:var(--accent)}
+.acctmenu-pop{position:absolute;right:0;top:calc(100% + 6px);min-width:170px;background:var(--panel);
+  border:1px solid var(--line2);border-radius:10px;padding:6px;box-shadow:0 8px 24px rgba(0,0,0,.14);z-index:20;
+  display:flex;flex-direction:column;gap:2px}
+.acctmenu-pop a,.acctmenu-pop button{display:block;width:100%;text-align:left;padding:7px 10px;border-radius:7px;
+  font:inherit;font-size:13px;color:var(--ink);background:transparent;border:none;cursor:pointer}
+.acctmenu-pop a:hover,.acctmenu-pop button:hover{background:var(--accent-soft)}

@@ -53,12 +53,19 @@ plan is in **`MASTER-PLAN-vps-2026-06-28.md`** (Phase 0 = this section).
    DB_USERNAME=codex
    DB_PASSWORD=…
    API_KEY=<long random string — the sync token>
-   APP_PASSWORD=<optional UI login; leave empty to disable>
+   APP_PASSWORD=<first-run bootstrap gate — see below>
    ```
    `config.php` already reads these via `getenv()` — no code change.
 4. **Create the tables:** open the site → **Sync → Import snapshot.json** (this calls
    `migrate()` first, creating the schema and seeding in one step), or run
-   `php bin/seed.php --migrate` over SSH.
+   `php bin/seed.php --migrate` over SSH. (Creating the first admin account also
+   lays the base tables, so a brand-new box works after setup even without this.)
+5. **Sign in (accounts & invites, Phase 17):** the UI uses real per-user accounts,
+   not a shared password. On first visit the site asks you to create the first
+   **administrator** — if `APP_PASSWORD` is set you must enter it to prove you're
+   the incumbent owner. From then on `APP_PASSWORD` is unused; add teammates from
+   **Users & invites** (admin only), which generates a one-time invite link. There
+   is no public signup. Admins can also issue single-use password-reset links.
 
 ## Part B — Load your three books (once)
 
@@ -109,7 +116,37 @@ because a copy lives at `projects/books/.claude/skills/codex-webapp-sync/`.
 - **Conflicts** (same entry changed in the app *and* the folder before a sync) are
   skipped and listed in `sync.log`; edit one side and re-run.
 - **Security:** all credentials live in Wasmer **secrets** (env vars), never in source —
-  set `API_KEY` long and random; Edge serves over HTTPS automatically; set `APP_PASSWORD`
-  to gate the site behind a shared login (omit to disable). Rotate `API_KEY`,
-  `DB_PASSWORD`, and `APP_PASSWORD` if they've ever been committed in plaintext, and
-  update the sync client's token to match.
+  set `API_KEY` long and random; Edge serves over HTTPS automatically. The UI is gated by
+  per-user accounts (Phase 17): `APP_PASSWORD` is only the one-time secret for creating the
+  first admin, then unused. Passwords are stored as `password_hash()` bcrypt hashes; sessions
+  use an HttpOnly, SameSite cookie (Secure over HTTPS) and regenerate on login. Rotate
+  `API_KEY`, `DB_PASSWORD`, and `APP_PASSWORD` if they've ever been committed in plaintext,
+  and update the sync client's token to match.
+- **Accounts, invites & resets** (Phase 17) live under **Users & invites** (admins only) and
+  **Account** (everyone). Onboarding is invite-only — no public registration endpoint exists.
+- **Book ownership & scoping** (Phase 18): the unit of ownership is the *book*, not the user —
+  a `book_members` row (owner/editor/viewer) says who can touch which book. The web library
+  shows each member exactly the books they belong to; creating or importing a book makes you
+  its owner. Admins and the token REST API see every book (per-user MCP auth is a later phase).
+  On upgrade, your existing books are backfilled to the first admin as owner.
+- **Roles & permissions** (Phase 19): every book-scoped write is checked server-side against
+  the caller's role — **owner** (full control + manage members + delete), **editor** (read/write
+  prose, entries, sources, tasks, plot board), **viewer** (read + comments/notes, no edits). The
+  target book is resolved from the object being changed (not the submitted form field), so you
+  can't reach another book's data by id. Owners manage collaborators on each book's **Members**
+  page (add existing accounts, invite new ones at a role, change roles, revoke), and a per-book
+  **activity log** records who changed what. The Sync page and snapshot import are admin-only.
+- **Concurrent editing & presence** (Phase 21): when two people (or a person and Claude) touch the
+  same chapter, an **optimistic conflict check** on save compares the body you loaded against the
+  current one — if it moved underneath you, the save is refused rather than clobbering, and your
+  draft is kept as an autosave. On top of that, **soft locks** show "Alice is editing this chapter"
+  in the editor and on the chapter page (a heartbeat-kept presence row, advisory only). Real-time
+  Google-Docs-style co-editing is intentionally deferred (it needs the DB-canonical flip).
+- **Per-user API tokens** (Phase 20): the REST/MCP surface (`api.php`) takes two kinds of token.
+  The shared **service token** (`API_KEY`) stays unscoped for the PowerShell sync and admin
+  automation. Each user can also mint **personal tokens** from **Account → API tokens** — Claude
+  or the MCP presents one and the request *acts as that user*, so every read/write routes through
+  the same membership scoping and role checks (reach only your books, at your role; snapshot
+  import and cross-book access are refused). Only a hash of each token is stored, they're shown
+  once, and they're revocable. Per-user spell-check dictionary words no longer leak between
+  co-authors, and chapter notes record their author.

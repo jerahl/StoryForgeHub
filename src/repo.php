@@ -3,6 +3,7 @@
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/md.php';
 require_once __DIR__ . '/profiles.php';   // book profiles (Phase 10): db sets, templates, band labels
+require_once __DIR__ . '/auth.php';       // accounts, sessions, invites (Phase 17)
 
 /* ----------------------------------------------------------------- books */
 /** Lazy-migration for the Phase 10 book profile. Additive column; existing books
@@ -14,14 +15,24 @@ function ensure_book_profile() {
 }
 function get_books() {
     ensure_book_profile();
-    $rows = all("SELECT * FROM books ORDER BY sort_order, title");
+    $uid = book_scope_uid();   // Phase 18: scope the library to the caller's memberships
+    if ($uid !== null) {
+        ensure_book_members();
+        $rows = all("SELECT b.* FROM books b JOIN book_members m ON m.book_id=b.id AND m.user_id=?
+                     ORDER BY b.sort_order, b.title", [$uid]);
+    } else {
+        $rows = all("SELECT * FROM books ORDER BY sort_order, title");
+    }
     foreach ($rows as &$b) $b = decorate_book($b);
     return $rows;
 }
 function get_book($id) {
     ensure_book_profile();
     $b = one("SELECT * FROM books WHERE id=?", [$id]);
-    return $b ? decorate_book($b) : null;
+    if (!$b) return null;
+    $uid = book_scope_uid();   // Phase 18: a user may only load books they're a member of
+    if ($uid !== null && !user_can_view_book($uid, $id)) return null;
+    return decorate_book($b);
 }
 /** Raw profile id for a book (default 'fiction'). Cheap; used where only the
  *  profile is needed (e.g. the POST handlers that work from a book id string). */
@@ -34,6 +45,20 @@ function set_book_profile($book_id, $profile) {
     ensure_book_profile();
     q("UPDATE books SET profile=? WHERE id=?", [normalize_profile($profile), $book_id]);
 }
+/** Authoritative book id a subject row belongs to (Phase 19 authorization).
+ *  Table is whitelisted so it can be interpolated safely. Returns null if absent. */
+function book_of($table, $id) {
+    static $ok = ['tasks','threads','chapters','sources','canvas_cards','canvas_links',
+                  'acts','vision_items','captures','chapter_notes','scenes','progressions',
+                  'entries','exercises','meta_pages','note_pages'];
+    if (!in_array($table, $ok, true)) return null;
+    return val("SELECT book_id FROM $table WHERE id=?", [(int)$id]);
+}
+/** Book id owning a task step (via its parent task). */
+function book_of_step($step_id) {
+    return val("SELECT t.book_id FROM task_steps s JOIN tasks t ON t.id=s.task_id WHERE s.id=?", [(int)$step_id]);
+}
+
 function decorate_book($b) {
     $id = $b['id'];
     $b['profile'] = normalize_profile($b['profile'] ?? 'fiction');
@@ -178,6 +203,52 @@ function set_chapter_status($id, $status) {
 /** Hard-delete a single chapter row (used by the explicit "Delete" control). */
 function delete_chapter($id) { q("DELETE FROM chapters WHERE id=?", [$id]); }
 
+/* ------------------------------------------- soft edit locks / presence (P21)
+ * Advisory only: they surface "Alice is editing Chapter 3" and warn before a
+ * likely collision, but never hard-block — the optimistic conflict check in
+ * write_chapter_file() is the real safety net. One row per (chapter, user),
+ * kept alive by a heartbeat; rows go stale after EDIT_LOCK_TTL seconds. */
+const EDIT_LOCK_TTL = 90;   // seconds without a heartbeat before a presence row is stale
+function ensure_editing_locks() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec("CREATE TABLE IF NOT EXISTS editing_locks (
+        id $pk, book_id VARCHAR(40) NOT NULL, chapter_id INT NOT NULL, user_id INT NOT NULL,
+        acquired_at DATETIME DEFAULT CURRENT_TIMESTAMP, heartbeat_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); }
+    catch (Exception $e) {}
+    try { db()->exec("CREATE UNIQUE INDEX uniq_edit_lock ON editing_locks (chapter_id, user_id)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_edit_lock_ch ON editing_locks (chapter_id)"); } catch (Exception $e) {}
+}
+/** Acquire or refresh this user's presence on a chapter. */
+function touch_edit_lock($book_id, $chapter_id, $user_id) {
+    if (!$user_id) return;
+    ensure_editing_locks();
+    $ex = one("SELECT id FROM editing_locks WHERE chapter_id=? AND user_id=?", [(int)$chapter_id, (int)$user_id]);
+    if ($ex) q("UPDATE editing_locks SET heartbeat_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$ex['id']]);
+    else     q("INSERT INTO editing_locks (book_id, chapter_id, user_id) VALUES (?,?,?)", [$book_id, (int)$chapter_id, (int)$user_id]);
+    // opportunistic sweep of stale rows so the table stays small
+    try { q("DELETE FROM editing_locks WHERE heartbeat_at < ?", [date('Y-m-d H:i:s', time() - EDIT_LOCK_TTL)]); } catch (Exception $e) {}
+}
+function release_edit_lock($chapter_id, $user_id) {
+    if (!$user_id) return;
+    ensure_editing_locks();
+    q("DELETE FROM editing_locks WHERE chapter_id=? AND user_id=?", [(int)$chapter_id, (int)$user_id]);
+}
+/** Users currently editing a chapter (fresh heartbeat), optionally excluding one. */
+function active_editors($chapter_id, $exclude_uid = null) {
+    ensure_editing_locks();
+    $cut = date('Y-m-d H:i:s', time() - EDIT_LOCK_TTL);
+    $rows = all("SELECT l.user_id, u.display_name, u.email FROM editing_locks l
+                 LEFT JOIN users u ON u.id=l.user_id
+                 WHERE l.chapter_id=? AND l.heartbeat_at >= ? ORDER BY l.acquired_at", [(int)$chapter_id, $cut]);
+    if ($exclude_uid !== null) $rows = array_values(array_filter($rows, function ($r) use ($exclude_uid) { return (int)$r['user_id'] !== (int)$exclude_uid; }));
+    return $rows;
+}
+/** Display names of other active editors (for a banner). */
+function other_editor_names($chapter_id, $exclude_uid) {
+    return array_map(function ($r) { return $r['display_name'] ?: ($r['email'] ?: 'Someone'); }, active_editors($chapter_id, $exclude_uid));
+}
+
 /** Phase 9 — write edited chapter prose back to the folder .md AND the DB.
  *  The ONLY place the app writes manuscript prose to disk. Implements the
  *  CONFLICT-not-overwrite rule: if the on-disk file differs from what the DB last
@@ -194,15 +265,17 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
 
     $rel = ltrim(str_replace('\\', '/', (string)$c['file']), '/');
     if ($rel === '' || strpos($rel, '..') !== false) return ['status'=>'error', 'msg'=>'Bad chapter path.'];
-    $path = rtrim($books, '/').'/'.$b['folder'].'/Manuscript/'.$rel;
+    $path = book_root($b).'/Manuscript/'.$rel;
 
     $new_md = md_body_norm($new_md);
     $dbBody = md_body_norm($c['body']);
 
-    // Guard against a sync updating this chapter between open and save: the edit
-    // page stamps md5() of the body it loaded; refuse if the DB no longer matches.
+    // Optimistic conflict check (Phase 9/21): the edit page stamps md5() of the
+    // body it loaded; refuse if the DB body changed underneath — whether from a
+    // sync OR a co-author saving first. Never clobber; the writer's draft is kept
+    // as an autosave (Phase 15) so nothing is lost.
     if ($base !== '' && $base !== md5($dbBody))
-        return ['status'=>'conflict', 'msg'=>'This chapter changed since you opened the editor (a sync updated it). Re-open the chapter and reapply your changes.'];
+        return ['status'=>'conflict', 'msg'=>'This chapter changed since you opened it — a sync or another editor saved first. Your draft is kept; re-open the chapter to see the current version and reapply your changes.'];
 
     if (is_file($path)) {
         $onDisk = md_body_norm(@file_get_contents($path));
@@ -236,6 +309,19 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
  *  projection, so New/Import are disabled. */
 function books_dir_set() { return (cfg()['books_dir'] ?? '') !== ''; }
 
+/** On-disk root for a single book, resolved from the book row (Phase 18). One
+ *  directory per book — currently <books_dir>/<folder>; centralized here so a
+ *  future <books_dir>/<id> relocation is a one-line change, not a callsite hunt.
+ *  Returns null when the books root isn't configured. $book may be a row or id. */
+function book_root($book) {
+    $books = cfg()['books_dir'] ?? '';
+    if ($books === '') return null;
+    if (!is_array($book)) $book = one("SELECT folder FROM books WHERE id=?", [$book]);
+    $folder = $book['folder'] ?? '';
+    if ($folder === '') return null;
+    return rtrim($books, '/') . '/' . $folder;
+}
+
 /** slug for a book folder / id or a chapter filename base: lowercase, ascii, dashes. */
 function slugify_folder($s) {
     $s = strtolower(trim((string)$s));
@@ -250,7 +336,7 @@ function manuscript_path($book, $rel) {
     if (!$books) return [null, 'Chapter files are disabled (CODEX_BOOKS_DIR not set).'];
     $rel = ltrim(str_replace('\\', '/', (string)$rel), '/');
     if (strpos($rel, '..') !== false) return [null, 'Bad chapter path.'];
-    return [rtrim($books, '/').'/'.$book['folder'].'/Manuscript/'.$rel, null];
+    return [book_root($book).'/Manuscript/'.$rel, null];
 }
 
 /** Physical prose writer shared by chapter editing (P9) and create/import: mkdir
@@ -402,6 +488,9 @@ function create_book($f) {
         'sort_order'=>(int) val("SELECT COALESCE(MAX(sort_order),-1)+1 FROM books", []),
         'profile'=>$profile,
     ]);
+    // Phase 18: the creator owns the book they just made (skipped in CLI/token
+    // contexts, where backfill assigns orphaned books to the admin instead).
+    if (function_exists('current_user_id') && ($uid = current_user_id())) add_book_member($id, $uid, 'owner', $uid);
     return ['status'=>'ok', 'msg'=>'Created book “'.$title.'”.', 'id'=>$id];
 }
 
@@ -487,6 +576,8 @@ function import_book_zip($zip_path, $opts = []) {
         'files'  => $payload,
         'manuscript_present' => $present,
     ]]]);
+    // Phase 18: whoever imported the book owns it (CLI/token imports fall to backfill).
+    if (function_exists('current_user_id') && ($uid = current_user_id())) add_book_member($id, $uid, 'owner', $uid);
     return ['status'=>'ok', 'msg'=>'Imported book “'.$title.'” — '.count($payload).' files ('.($report['chapters'] ?? 0).' chapters, '.($report['entries'] ?? 0).' entries).', 'id'=>$id, 'report'=>$report];
 }
 
@@ -959,6 +1050,9 @@ function ensure_chapter_notes() {
         id $pk, book_id VARCHAR(40) NOT NULL, chapter_file VARCHAR(255) NOT NULL,
         quote TEXT, note TEXT, status VARCHAR(20) DEFAULT 'open', task_id INT DEFAULT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
+    // Phase 20: attribute a note to the collaborator who left it (notes stay shared
+    // within the book — they're review comments — but now carry an author).
+    try { db()->exec("ALTER TABLE chapter_notes ADD COLUMN user_id INT DEFAULT NULL"); } catch (Exception $e) {}
 }
 function get_chapter_notes($book_id, $file = null, $status = null) {
     ensure_chapter_notes();
@@ -974,8 +1068,8 @@ function count_chapter_notes($book_id, $file, $status = 'open') {
 }
 function add_chapter_note($book_id, $file, $quote, $note) {
     ensure_chapter_notes();
-    q("INSERT INTO chapter_notes (book_id, chapter_file, quote, note, status) VALUES (?,?,?,?, 'open')",
-      [$book_id, $file, $quote, $note]);
+    q("INSERT INTO chapter_notes (book_id, chapter_file, quote, note, status, user_id) VALUES (?,?,?,?, 'open', ?)",
+      [$book_id, $file, $quote, $note, function_exists('current_user_id') ? current_user_id() : null]);
     return last_id();
 }
 function set_chapter_note_status($id, $status) {
@@ -999,10 +1093,18 @@ function ensure_dictionary_terms() {
         id $pk, book_id VARCHAR(40) NOT NULL, term VARCHAR(190) NOT NULL,
         source VARCHAR(10) DEFAULT 'user', created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
     try { db()->exec("CREATE UNIQUE INDEX uniq_dict ON dictionary_terms (book_id, term)"); } catch (Exception $e) {}
+    // Phase 20: a writer's personal spell-check words shouldn't appear in a
+    // co-author's dictionary. Stamp the author; shared Codex proper nouns and
+    // pre-P20 (null) terms stay visible to everyone.
+    try { db()->exec("ALTER TABLE dictionary_terms ADD COLUMN user_id INT DEFAULT NULL"); } catch (Exception $e) {}
 }
 function get_dictionary_terms($book_id) {
     ensure_dictionary_terms();
-    return all("SELECT * FROM dictionary_terms WHERE book_id=? ORDER BY LOWER(term)", [$book_id]);
+    $uid = function_exists('current_user_id') ? current_user_id() : null;
+    if ($uid === null)   // unscoped (service token / CLI) — the whole book's dictionary
+        return all("SELECT * FROM dictionary_terms WHERE book_id=? ORDER BY LOWER(term)", [$book_id]);
+    return all("SELECT * FROM dictionary_terms WHERE book_id=? AND (user_id=? OR user_id IS NULL OR source='codex') ORDER BY LOWER(term)",
+               [$book_id, $uid]);
 }
 /** Just the term strings — handed to the editor for the client-side dictionary check. */
 function get_dictionary_words($book_id) {
@@ -1020,8 +1122,9 @@ function add_dictionary_term($book_id, $term, $source = 'user') {
     $len  = function_exists('mb_strlen') ? mb_strlen($term) : strlen($term);
     if ($term === '' || $len > 190) return false;
     if (dictionary_has($book_id, $term)) return false;
-    try { q("INSERT INTO dictionary_terms (book_id, term, source) VALUES (?,?,?)",
-        [$book_id, $term, $source === 'codex' ? 'codex' : 'user']); }
+    $uid = ($source === 'codex') ? null : (function_exists('current_user_id') ? current_user_id() : null);
+    try { q("INSERT INTO dictionary_terms (book_id, term, source, user_id) VALUES (?,?,?,?)",
+        [$book_id, $term, $source === 'codex' ? 'codex' : 'user', $uid]); }
     catch (Exception $e) { return false; }   // unique-index race
     return true;
 }

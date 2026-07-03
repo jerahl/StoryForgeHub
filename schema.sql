@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS chapter_notes (
   note         TEXT,                               -- the change to make
   status       VARCHAR(20) DEFAULT 'open',         -- open|resolved
   task_id      INT DEFAULT NULL,                   -- set when promoted to a Task
+  user_id      INT DEFAULT NULL,                   -- author of the note (Phase 20 attribution)
   created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
   KEY k_book_file (book_id, chapter_file)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -277,6 +278,104 @@ CREATE TABLE IF NOT EXISTS exercises (
   updated_at      DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   KEY k_ex_ch (chapter_id),
   KEY k_ex_book (book_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- users (Phase 17, Track E) — real accounts replace the single shared password.
+CREATE TABLE IF NOT EXISTS users (
+  id            INT AUTO_INCREMENT PRIMARY KEY,
+  email         VARCHAR(190) NOT NULL,
+  display_name  VARCHAR(160) DEFAULT '',
+  password_hash VARCHAR(255) DEFAULT '',
+  status        VARCHAR(20)  DEFAULT 'active',        -- active|disabled
+  is_admin      INT          DEFAULT 0,
+  created_at    DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at  DATETIME     DEFAULT NULL,
+  UNIQUE KEY uniq_user_email (email)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- invites (Phase 17) — invite-only onboarding; no public signup endpoint exists.
+CREATE TABLE IF NOT EXISTS invites (
+  id               INT AUTO_INCREMENT PRIMARY KEY,
+  email            VARCHAR(190) DEFAULT '',
+  token            VARCHAR(64)  NOT NULL,
+  role             VARCHAR(20)  DEFAULT 'editor',      -- per-book role granted on acceptance (P19)
+  book_id          VARCHAR(40)  DEFAULT '',            -- book the invite grants access to ('' = account-only)
+  is_admin         INT          DEFAULT 0,
+  invited_by       INT          DEFAULT NULL,
+  created_at       DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  expires_at       DATETIME     DEFAULT NULL,
+  accepted_at      DATETIME     DEFAULT NULL,
+  accepted_user_id INT          DEFAULT NULL,
+  UNIQUE KEY uniq_invite_token (token)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- password_resets (Phase 17) — admin-issued, single-use, link-based reset.
+CREATE TABLE IF NOT EXISTS password_resets (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  user_id     INT          NOT NULL,
+  token       VARCHAR(64)  NOT NULL,
+  created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  expires_at  DATETIME     DEFAULT NULL,
+  used_at     DATETIME     DEFAULT NULL,
+  UNIQUE KEY uniq_reset_token (token)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- book_members (Phase 18, Track E) — the unit of ownership is the book, not the
+-- user. A shared book has one+ owners plus editors/viewers; the web library is
+-- scoped to the caller's memberships (admins & the token API see everything).
+CREATE TABLE IF NOT EXISTS book_members (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  book_id     VARCHAR(40)  NOT NULL,
+  user_id     INT          NOT NULL,
+  role        VARCHAR(20)  DEFAULT 'editor',        -- owner|editor|viewer
+  added_by    INT          DEFAULT NULL,
+  created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_book_member (book_id, user_id),
+  KEY k_member_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- book_activity (Phase 19) — lightweight who-did-what-when trail for a shared book.
+CREATE TABLE IF NOT EXISTS book_activity (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  book_id     VARCHAR(40)  NOT NULL,
+  user_id     INT          DEFAULT NULL,
+  action      VARCHAR(40)  NOT NULL,                  -- entry_save|chapter_save|member_add|...
+  detail      VARCHAR(255) DEFAULT '',
+  created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  KEY k_activity_book (book_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- api_tokens (Phase 20) — revocable per-user credentials for the MCP / automation.
+-- Only a SHA-256 hash of each token is stored; the raw token is shown once. When
+-- a request presents one, the API acts as that user under the P18/P19 checks.
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id           INT AUTO_INCREMENT PRIMARY KEY,
+  user_id      INT          NOT NULL,
+  token_hash   VARCHAR(64)  NOT NULL,
+  label        VARCHAR(120) DEFAULT '',
+  created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  last_used_at DATETIME     DEFAULT NULL,
+  revoked_at   DATETIME     DEFAULT NULL,
+  UNIQUE KEY uniq_api_token_hash (token_hash),
+  KEY k_api_token_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- dictionary_terms also gains user_id in Phase 20 (personal spell-check words);
+-- see src/repo.php ensure_dictionary_terms() for the additive migration.
+
+-- editing_locks (Phase 21) — advisory soft locks / presence for the chapter editor.
+-- One row per (chapter, user), kept alive by a heartbeat; stale rows are swept.
+-- Advisory only: the optimistic conflict check in write_chapter_file() is the
+-- real never-clobber guarantee.
+CREATE TABLE IF NOT EXISTS editing_locks (
+  id           INT AUTO_INCREMENT PRIMARY KEY,
+  book_id      VARCHAR(40) NOT NULL,
+  chapter_id   INT         NOT NULL,
+  user_id      INT         NOT NULL,
+  acquired_at  DATETIME    DEFAULT CURRENT_TIMESTAMP,
+  heartbeat_at DATETIME    DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_edit_lock (chapter_id, user_id),
+  KEY k_edit_lock_ch (chapter_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 SET foreign_key_checks = 1;
