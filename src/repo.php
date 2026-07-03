@@ -203,6 +203,52 @@ function set_chapter_status($id, $status) {
 /** Hard-delete a single chapter row (used by the explicit "Delete" control). */
 function delete_chapter($id) { q("DELETE FROM chapters WHERE id=?", [$id]); }
 
+/* ------------------------------------------- soft edit locks / presence (P21)
+ * Advisory only: they surface "Alice is editing Chapter 3" and warn before a
+ * likely collision, but never hard-block — the optimistic conflict check in
+ * write_chapter_file() is the real safety net. One row per (chapter, user),
+ * kept alive by a heartbeat; rows go stale after EDIT_LOCK_TTL seconds. */
+const EDIT_LOCK_TTL = 90;   // seconds without a heartbeat before a presence row is stale
+function ensure_editing_locks() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec("CREATE TABLE IF NOT EXISTS editing_locks (
+        id $pk, book_id VARCHAR(40) NOT NULL, chapter_id INT NOT NULL, user_id INT NOT NULL,
+        acquired_at DATETIME DEFAULT CURRENT_TIMESTAMP, heartbeat_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); }
+    catch (Exception $e) {}
+    try { db()->exec("CREATE UNIQUE INDEX uniq_edit_lock ON editing_locks (chapter_id, user_id)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_edit_lock_ch ON editing_locks (chapter_id)"); } catch (Exception $e) {}
+}
+/** Acquire or refresh this user's presence on a chapter. */
+function touch_edit_lock($book_id, $chapter_id, $user_id) {
+    if (!$user_id) return;
+    ensure_editing_locks();
+    $ex = one("SELECT id FROM editing_locks WHERE chapter_id=? AND user_id=?", [(int)$chapter_id, (int)$user_id]);
+    if ($ex) q("UPDATE editing_locks SET heartbeat_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$ex['id']]);
+    else     q("INSERT INTO editing_locks (book_id, chapter_id, user_id) VALUES (?,?,?)", [$book_id, (int)$chapter_id, (int)$user_id]);
+    // opportunistic sweep of stale rows so the table stays small
+    try { q("DELETE FROM editing_locks WHERE heartbeat_at < ?", [date('Y-m-d H:i:s', time() - EDIT_LOCK_TTL)]); } catch (Exception $e) {}
+}
+function release_edit_lock($chapter_id, $user_id) {
+    if (!$user_id) return;
+    ensure_editing_locks();
+    q("DELETE FROM editing_locks WHERE chapter_id=? AND user_id=?", [(int)$chapter_id, (int)$user_id]);
+}
+/** Users currently editing a chapter (fresh heartbeat), optionally excluding one. */
+function active_editors($chapter_id, $exclude_uid = null) {
+    ensure_editing_locks();
+    $cut = date('Y-m-d H:i:s', time() - EDIT_LOCK_TTL);
+    $rows = all("SELECT l.user_id, u.display_name, u.email FROM editing_locks l
+                 LEFT JOIN users u ON u.id=l.user_id
+                 WHERE l.chapter_id=? AND l.heartbeat_at >= ? ORDER BY l.acquired_at", [(int)$chapter_id, $cut]);
+    if ($exclude_uid !== null) $rows = array_values(array_filter($rows, function ($r) use ($exclude_uid) { return (int)$r['user_id'] !== (int)$exclude_uid; }));
+    return $rows;
+}
+/** Display names of other active editors (for a banner). */
+function other_editor_names($chapter_id, $exclude_uid) {
+    return array_map(function ($r) { return $r['display_name'] ?: ($r['email'] ?: 'Someone'); }, active_editors($chapter_id, $exclude_uid));
+}
+
 /** Phase 9 — write edited chapter prose back to the folder .md AND the DB.
  *  The ONLY place the app writes manuscript prose to disk. Implements the
  *  CONFLICT-not-overwrite rule: if the on-disk file differs from what the DB last
@@ -224,10 +270,12 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     $new_md = md_body_norm($new_md);
     $dbBody = md_body_norm($c['body']);
 
-    // Guard against a sync updating this chapter between open and save: the edit
-    // page stamps md5() of the body it loaded; refuse if the DB no longer matches.
+    // Optimistic conflict check (Phase 9/21): the edit page stamps md5() of the
+    // body it loaded; refuse if the DB body changed underneath — whether from a
+    // sync OR a co-author saving first. Never clobber; the writer's draft is kept
+    // as an autosave (Phase 15) so nothing is lost.
     if ($base !== '' && $base !== md5($dbBody))
-        return ['status'=>'conflict', 'msg'=>'This chapter changed since you opened the editor (a sync updated it). Re-open the chapter and reapply your changes.'];
+        return ['status'=>'conflict', 'msg'=>'This chapter changed since you opened it — a sync or another editor saved first. Your draft is kept; re-open the chapter to see the current version and reapply your changes.'];
 
     if (is_file($path)) {
         $onDisk = md_body_norm(@file_get_contents($path));

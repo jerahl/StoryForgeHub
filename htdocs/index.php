@@ -53,6 +53,7 @@ function book_gate($a) {
             $json = in_array($a, ['reorder_chapters','reorder_scenes','canvas_add_card','canvas_add_ref_card','canvas_add_link','dictionary_add'], true);
             return $mk('edit', $postbook, $json);
         case 'chapter_autosave': case 'chapter_revision_get': case 'chapter_revision_discard_draft':
+        case 'edit_heartbeat': case 'edit_release':   // Phase 21 soft-lock presence (JSON)
             return $mk('edit', book_of('chapters', $P['id'] ?? $P['cid'] ?? 0), true);
 
         /* --- edit, target book resolved from the subject id (IDOR-safe) --- */
@@ -267,6 +268,17 @@ if ($method === 'POST') {
         $conflict = ($base !== '' && $base !== md_body_hash($c['body']));
         save_chapter_autosave_draft($book, $cid, $c['file'], $md);
         echo json_encode(['ok'=>true, 'saved_at'=>date('c'), 'conflict'=>$conflict, 'words'=>md_word_count($md)]); exit;
+    }
+    if ($a === 'edit_heartbeat') {   // Phase 21: refresh presence + report other active editors (JSON)
+        header('Content-Type: application/json; charset=utf-8');
+        $cid = (int)($_POST['cid'] ?? 0);
+        touch_edit_lock($book, $cid, current_user_id());
+        echo json_encode(['ok'=>true, 'others'=>other_editor_names($cid, current_user_id())]); exit;
+    }
+    if ($a === 'edit_release') {   // Phase 21: drop presence when leaving the editor (JSON / beacon)
+        header('Content-Type: application/json; charset=utf-8');
+        release_edit_lock((int)($_POST['cid'] ?? 0), current_user_id());
+        echo json_encode(['ok'=>true]); exit;
     }
     if ($a === 'chapter_revision_get') {   // Phase 15: fetch one snapshot's body for "load into editor" (JSON)
         header('Content-Type: application/json; charset=utf-8');
@@ -1242,6 +1254,8 @@ case 'chapter':
     echo '<a class="btn sm" href="'.url(['p'=>'diagnostics','book'=>$book['id'],'id'=>$c['id']]).'">Diagnostics</a>';
     if (trim((string)$c['body']) !== '') echo '<button type="button" class="btn sm primary" id="smartToggle">✦ Smart editing</button>';
     echo '<span style="margin-left:6px">Status:</span> '.status_select($book['id'], $c, 'chapter');
+    $edn = other_editor_names((int)$c['id'], current_user_id());   // Phase 21 presence
+    if ($edn) echo '<span style="margin-left:8px;font-size:12px;color:#8A3F4B;font-weight:600" title="Someone has this chapter open in the editor">✎ '.e(implode(', ', $edn)).' '.(count($edn) > 1 ? 'are' : 'is').' editing now</span>';
     echo '</div>';
     /* ---- Phase 9c: slide-in Smart-editing panel (renders the cached diagnostics) ---- */
     if (trim((string)$c['body']) !== '') try {
@@ -1496,6 +1510,30 @@ case 'chapter_edit':
     if (!$c || $c['book_id'] !== $book['id']) { echo '<p class="empty">Chapter not found.</p>'; break; }
     if (!(cfg()['books_dir'] ?? '')) { echo '<p class="empty">Chapter editing is disabled on this server.</p>'; break; }
     echo '<div class="pagehead"><div><h1>Edit · '.e($c['title']).'</h1><p class="desc">Edit the chapter prose (Markdown). Saving writes it back to <span class="mono">Manuscript/'.e($c['file']).'</span> and the database. A timestamped backup is kept in <span class="mono">Manuscript/_backups/</span>; if the file changed on disk since you opened it, the save is refused (no overwrite). Keystrokes autosave to a recoverable draft; spell check uses your browser plus this book’s <a href="'.url(['p'=>'dictionary','book'=>$book['id']]).'">custom dictionary</a>.</p></div></div>';
+
+    // Phase 21: take an advisory soft lock and surface anyone else in this chapter.
+    touch_edit_lock($book['id'], (int)$c['id'], current_user_id());
+    $others0 = other_editor_names((int)$c['id'], current_user_id());
+    $othTxt = function($names){ return e(implode(', ', $names)).' '.(count($names) > 1 ? 'are' : 'is').' also editing this chapter right now — whoever saves last may hit a conflict.'; };
+    echo '<div class="flash err" id="presenceBanner"'.($others0 ? '' : ' style="display:none"').'><span id="presenceText">'.($others0 ? $othTxt($others0) : '').'</span></div>';
+    echo '<script>(function(){
+      var cid='.(int)$c['id'].', book='.json_encode((string)$book['id']).';
+      var banner=document.getElementById("presenceBanner"), txt=document.getElementById("presenceText");
+      function fmt(names){ return names.join(", ")+" "+(names.length>1?"are":"is")+" also editing this chapter right now — whoever saves last may hit a conflict."; }
+      function beat(){
+        var fd=new FormData(); fd.append("action","edit_heartbeat"); fd.append("book",book); fd.append("cid",cid);
+        fetch("?", {method:"POST", body:fd, credentials:"same-origin"}).then(function(r){return r.json();}).then(function(d){
+          if(!d||!d.ok) return;
+          if(d.others && d.others.length){ txt.textContent=fmt(d.others); banner.style.display=""; }
+          else { banner.style.display="none"; }
+        }).catch(function(){});
+      }
+      var iv=setInterval(beat, 30000);
+      function release(){ try{ var fd=new FormData(); fd.append("action","edit_release"); fd.append("book",book); fd.append("cid",cid);
+        if(navigator.sendBeacon){ navigator.sendBeacon("?", fd); } else { fetch("?", {method:"POST", body:fd, credentials:"same-origin", keepalive:true}); } }catch(e){} }
+      window.addEventListener("pagehide", release);
+      window.addEventListener("beforeunload", function(){ clearInterval(iv); release(); });
+    })();</script>';
 
     echo <<<'CSS'
 <style>

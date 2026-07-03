@@ -363,4 +363,19 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 -- dictionary_terms also gains user_id in Phase 20 (personal spell-check words);
 -- see src/repo.php ensure_dictionary_terms() for the additive migration.
 
+-- editing_locks (Phase 21) — advisory soft locks / presence for the chapter editor.
+-- One row per (chapter, user), kept alive by a heartbeat; stale rows are swept.
+-- Advisory only: the optimistic conflict check in write_chapter_file() is the
+-- real never-clobber guarantee.
+CREATE TABLE IF NOT EXISTS editing_locks (
+  id           INT AUTO_INCREMENT PRIMARY KEY,
+  book_id      VARCHAR(40) NOT NULL,
+  chapter_id   INT         NOT NULL,
+  user_id      INT         NOT NULL,
+  acquired_at  DATETIME    DEFAULT CURRENT_TIMESTAMP,
+  heartbeat_at DATETIME    DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uniq_edit_lock (chapter_id, user_id),
+  KEY k_edit_lock_ch (chapter_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET foreign_key_checks = 1;

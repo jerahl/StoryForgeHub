@@ -136,6 +136,12 @@ because a copy lives at `projects/books/.claude/skills/codex-webapp-sync/`.
   can't reach another book's data by id. Owners manage collaborators on each book's **Members**
   page (add existing accounts, invite new ones at a role, change roles, revoke), and a per-book
   **activity log** records who changed what. The Sync page and snapshot import are admin-only.
+- **Concurrent editing & presence** (Phase 21): when two people (or a person and Claude) touch the
+  same chapter, an **optimistic conflict check** on save compares the body you loaded against the
+  current one — if it moved underneath you, the save is refused rather than clobbering, and your
+  draft is kept as an autosave. On top of that, **soft locks** show "Alice is editing this chapter"
+  in the editor and on the chapter page (a heartbeat-kept presence row, advisory only). Real-time
+  Google-Docs-style co-editing is intentionally deferred (it needs the DB-canonical flip).
 - **Per-user API tokens** (Phase 20): the REST/MCP surface (`api.php`) takes two kinds of token.
   The shared **service token** (`API_KEY`) stays unscoped for the PowerShell sync and admin
   automation. Each user can also mint **personal tokens** from **Account → API tokens** — Claude
