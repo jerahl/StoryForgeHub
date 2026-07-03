@@ -11,8 +11,25 @@ Streamable-HTTP on loopback `127.0.0.1:8765`, fronted by Caddy at
 
 ## Tools
 `codex_status`, `codex_search`, `codex_get_entry`, `codex_save_entry`,
-`codex_list_chapters`, `codex_get_tasks`, `codex_complete_task`,
-`codex_log_writing`, `codex_sync(dry_run)`. Every write flows through api.php.
+`codex_save_chapter`, `codex_push_files`, `codex_list_chapters`,
+`codex_get_tasks`, `codex_complete_task`, `codex_log_writing`,
+`codex_sync(dry_run)`. Every write flows through api.php.
+
+### Pushing new files
+- `codex_save_entry(book, db, slug, markdown)` — a Codex entry.
+- `codex_save_chapter(book, filename, markdown)` — a manuscript chapter.
+- `codex_push_files(book, files, reconcile_chapters=False)` — a map of
+  relpath→Markdown for any type api.php's push understands: `Manuscript/<file>.md`,
+  `Codex/<Folder>/<slug>.md`, `Codex/Notes/<slug>.md`, `Codex/Meta/<slug>.md`,
+  `Codex/Sources/<key>.md`, `Codex/Meta/progressions.md`.
+
+The book's on-disk folder is resolved from the live `export` snapshot, so pushes
+work without a populated `CODEX_BOOKS_DIR`. Pushing a `Manuscript/*.md` file
+normally makes the app archive every chapter the folder omits; the chapter/push
+tools guard against this by declaring the book's current chapters present, so
+**adding** a chapter never archives the others. Pass `reconcile_chapters=True`
+(or `reconcile=True` on `codex_save_chapter`) only when you intend a full
+manuscript reconcile that archives omitted chapters.
 
 ## Bring it up
 ```bash
