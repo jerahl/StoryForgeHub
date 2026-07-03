@@ -24,8 +24,8 @@ bearer token). If they aren't, tell Stephen to add the connector and stop — do
 fall back to editing files or a bridge (those are retired).
 
 Tools used: `codex_status`, `codex_get_tasks`, `codex_search`, `codex_get_entry`,
-`codex_save_entry`, `codex_complete_task`, `codex_log_writing`, `codex_list_chapters`,
-`codex_sync`.
+`codex_save_entry`, `codex_save_chapter`, `codex_push_files`, `codex_complete_task`,
+`codex_log_writing`, `codex_list_chapters`, `codex_sync`.
 
 ## Before doing anything
 1. Call `codex_status` to confirm the connector is live (book/entry counts return).

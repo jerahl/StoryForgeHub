@@ -52,6 +52,23 @@ def build_app(token: str, books_root: str, api_url: str, engine_dir: str | None 
         return tools.save_entry(book, db, slug, markdown)
 
     @mcp.tool()
+    def codex_save_chapter(book: str, filename: str, markdown: str,
+                           reconcile: bool = False) -> dict:
+        """Create/update a manuscript chapter from Markdown. filename is a bare
+        name (e.g. 'ch-05-the-wall.md'). Adding a chapter never archives the
+        others unless reconcile=True (which archives chapters absent from books)."""
+        return tools.save_chapter(book, filename, markdown, reconcile)
+
+    @mcp.tool()
+    def codex_push_files(book: str, files: dict, reconcile_chapters: bool = False) -> dict:
+        """Push new/updated files (a map of relpath -> Markdown) to a book.
+        Handles chapters (Manuscript/<file>.md), entries (Codex/<Folder>/<slug>.md),
+        notes (Codex/Notes/<slug>.md), meta (Codex/Meta/<slug>.md), and sources
+        (Codex/Sources/<key>.md). reconcile_chapters=True lets a manuscript push
+        archive chapters it omits; default False preserves existing chapters."""
+        return tools.push_files(book, files, reconcile_chapters)
+
+    @mcp.tool()
     def codex_list_chapters(book: str | None = None) -> list:
         """List chapters (num, title, status, words, file)."""
         return tools.list_chapters(book)

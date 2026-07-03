@@ -61,6 +61,8 @@ Connector: `https://storyforgehub.cloud/mcp`, header `Authorization: Bearer <API
 | `codex_search(query, book?, limit?)` | find entries by name/slug/field/section text |
 | `codex_get_entry(book, db, slug)` | fetch one entry as Markdown |
 | `codex_save_entry(book, db, slug, markdown)` | create/update an entry (routes through api.php push) |
+| `codex_save_chapter(book, filename, markdown, reconcile=false)` | create/update a manuscript chapter; adding one never archives the others unless `reconcile=true` |
+| `codex_push_files(book, files, reconcile_chapters=false)` | push a map of relpath→Markdown (chapters, entries, notes, meta, sources) in one call |
 | `codex_list_chapters(book?)` | chapters with num/title/status/words/file |
 | `codex_log_writing(book, words_added, total_words?, chapters?, minutes?, mood?, note?)` | append a writing-log row for today |
 | `codex_sync(dry_run=true)` | run one folder↔DB reconcile cycle (dry-run reports without writing) |

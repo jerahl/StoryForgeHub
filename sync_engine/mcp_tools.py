@@ -8,9 +8,12 @@ offline with a fake api object. Every write still flows through api.php.
 from __future__ import annotations
 import datetime
 import os
+import re
 import subprocess
 import sys
 from typing import Any, Dict, List, Optional
+
+_MANUSCRIPT_RE = re.compile(r"^Manuscript/.+\.md$", re.IGNORECASE)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import codex_sync_lib as csl
@@ -93,13 +96,64 @@ class CodexTools:
         return self.api.apply({"writing_log": [row]})
 
     # ---- writes ----
-    def save_entry(self, book: str, db: str, slug: str, md: str) -> dict:
+    def _resolve_book(self, book: str):
+        """Resolve a book to (folder, metadata, snapshot). Prefer the live server
+        snapshot (the source of truth for the on-disk folder name) and fall back
+        to the local books config, so a push works even without a populated
+        books_root. `snapshot` is the export's book struct (or None)."""
+        for b in self.api.export().get("books", []):
+            rec = b.get("book") or {}
+            if rec.get("id") == book and rec.get("folder"):
+                return rec["folder"], dict(rec), b
         cfg = {b["id"]: b for b in csl.load_books_config(self.books_root)}.get(book)
-        if not cfg:
-            raise ValueError(f"unknown book {book}")
+        if cfg:
+            return cfg["folder"], {"id": book, **cfg}, None
+        raise ValueError(f"unknown book {book}")
+
+    def push_files(self, book: str, files: Dict[str, str],
+                   reconcile_chapters: bool = False) -> dict:
+        """Push one or more files (relpath -> Markdown) to a book via api.php.
+
+        Accepts any relpath api.php's push understands: Manuscript/<file>.md
+        (chapters), Codex/<Folder>/<slug>.md (entries), Codex/Notes/<slug>.md,
+        Codex/Meta/<slug>.md, Codex/Sources/<key>.md, Codex/Meta/progressions.md.
+
+        Guard: pushing any Manuscript/*.md normally makes the app archive every
+        chapter NOT in the push (folder is treated as the full set). Unless
+        reconcile_chapters=True, we declare the book's current chapters present so
+        adding one chapter never archives the rest.
+        """
+        files = {str(k).replace("\\", "/"): v for k, v in (files or {}).items()}
+        if not files:
+            raise ValueError("no files to push")
+        folder, meta, snapshot = self._resolve_book(book)
+        entry = {"folder": folder, "book": meta, "files": files}
+        pushed_ms = [k for k in files if _MANUSCRIPT_RE.match(k)]
+        if pushed_ms and not reconcile_chapters:
+            present = {os.path.basename(k) for k in pushed_ms}
+            for c in (snapshot or {}).get("chapters", []):
+                if c.get("file"):
+                    present.add(os.path.basename(c["file"]))
+            entry["manuscript_present"] = sorted(present)
+        return self.api.push([entry])
+
+    def save_entry(self, book: str, db: str, slug: str, md: str) -> dict:
+        if db not in csl.DBMETA:
+            raise ValueError(f"unknown db {db}")
         relpath = f"Codex/{csl.DBMETA[db]['folder']}/{slug}.md"
-        return self.api.push([{"folder": cfg["folder"], "book": {"id": book, **cfg},
-                               "files": {relpath: md}}])
+        return self.push_files(book, {relpath: md})
+
+    def save_chapter(self, book: str, filename: str, md: str,
+                     reconcile: bool = False) -> dict:
+        """Create/update a manuscript chapter from Markdown. `filename` is a bare
+        file name (e.g. 'ch-05-the-wall.md'); '.md' is appended if missing. Adding
+        a chapter never archives the others unless reconcile=True."""
+        fn = os.path.basename(str(filename).replace("\\", "/").strip())
+        if not fn:
+            raise ValueError("filename is required")
+        if not fn.lower().endswith(".md"):
+            fn += ".md"
+        return self.push_files(book, {f"Manuscript/{fn}": md}, reconcile_chapters=reconcile)
 
     # ---- sync (runs the reconcile cycle out-of-process) ----
     def sync(self, dry_run: bool = True, token: Optional[str] = None,
