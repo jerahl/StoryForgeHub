@@ -153,8 +153,17 @@ function logout_user() {
     unset($_SESSION['uid']);
     $GLOBALS['__current_user'] = null;
 }
-/** The logged-in, still-active user row, or null. Cached per request. */
+/**
+ * Bind the request to a user WITHOUT a session — used by api.php when a per-user
+ * API token identifies the caller (Phase 20). The MCP then "acts as" that user
+ * and every book-scoped read/write routes through the same P18/P19 checks.
+ */
+function act_as_user($u) { $GLOBALS['__acting_user'] = $u ?: null; $GLOBALS['__current_user'] = null; }
+
+/** The current user row, or null. An explicit acting user (token auth) wins over
+ *  the session. Cached per request. */
 function current_user() {
+    if (!empty($GLOBALS['__acting_user'])) return $GLOBALS['__acting_user'];
     if (array_key_exists('__current_user', $GLOBALS) && $GLOBALS['__current_user'] !== null)
         return $GLOBALS['__current_user'];
     if (empty($_SESSION['uid'])) return $GLOBALS['__current_user'] = null;
@@ -247,6 +256,62 @@ function consume_password_reset($token, $password) {
     set_user_password((int)$r['user_id'], $password);
     q("UPDATE password_resets SET used_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$r['id']]);
     return (int)$r['user_id'];
+}
+
+/* ============================================================ per-user API tokens
+   Phase 20: replace the single shared bearer token with revocable per-user
+   tokens. The MCP presents a user's token and then acts as that user; only a
+   SHA-256 hash of the token is stored (tokens are high-entropy, so a fast hash
+   is sufficient and lets us look them up). The raw token is shown once.
+   =============================================================================== */
+
+function ensure_api_tokens() {
+    static $done = false; if ($done) return; $done = true;
+    ensure_users();
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec(
+        "CREATE TABLE IF NOT EXISTS api_tokens (
+            id $pk,
+            user_id INT NOT NULL,
+            token_hash VARCHAR(64) NOT NULL,
+            label VARCHAR(120) DEFAULT '',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            last_used_at DATETIME DEFAULT NULL,
+            revoked_at DATETIME DEFAULT NULL )"
+    ); } catch (Exception $e) {}
+    try { db()->exec("CREATE UNIQUE INDEX uniq_api_token_hash ON api_tokens (token_hash)"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_api_token_user ON api_tokens (user_id)"); } catch (Exception $e) {}
+}
+function hash_api_token($raw) { return hash('sha256', (string)$raw); }
+
+/** Mint a token for a user. Returns the RAW token (store it now — it isn't recoverable). */
+function create_api_token($uid, $label = '') {
+    ensure_api_tokens();
+    $raw = 'codex_' . gen_token(24);   // recognizable prefix + 48 hex chars
+    q("INSERT INTO api_tokens (user_id, token_hash, label) VALUES (?,?,?)",
+      [(int)$uid, hash_api_token($raw), trim((string)$label)]);
+    return $raw;
+}
+function list_api_tokens($uid) {
+    ensure_api_tokens();
+    return all("SELECT * FROM api_tokens WHERE user_id=? AND revoked_at IS NULL ORDER BY id DESC", [(int)$uid]);
+}
+/** Revoke a token; scoped to its owner unless $allow_any (admin). */
+function revoke_api_token($id, $owner_uid = null) {
+    ensure_api_tokens();
+    if ($owner_uid === null) q("UPDATE api_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE id=? AND revoked_at IS NULL", [(int)$id]);
+    else q("UPDATE api_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=? AND revoked_at IS NULL", [(int)$id, (int)$owner_uid]);
+}
+/** Resolve a raw token to its active user, or null. Updates last_used on success. */
+function user_for_api_token($raw) {
+    if (!is_string($raw) || $raw === '') return null;
+    ensure_api_tokens();
+    $row = one("SELECT * FROM api_tokens WHERE token_hash=? AND revoked_at IS NULL", [hash_api_token($raw)]);
+    if (!$row) return null;
+    $u = get_user((int)$row['user_id']);
+    if (!$u || $u['status'] !== 'active') return null;
+    try { q("UPDATE api_tokens SET last_used_at=CURRENT_TIMESTAMP WHERE id=?", [(int)$row['id']]); } catch (Exception $e) {}
+    return $u;
 }
 
 /* =====================================================================

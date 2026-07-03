@@ -22,9 +22,11 @@ return [
         'charset' => 'utf8mb4',
     ],
 
-    // --- REST API token ---
-    // The sync client (PowerShell today, MCP server later) must send this as the
-    // X-Codex-Token header (or ?token=...). Set the API_KEY secret on Edge.
+    // --- REST API service token ---
+    // Sent as the X-Codex-Token header (or ?token=...). This is the *unscoped
+    // service* token for the PowerShell sync + admin automation. Phase 20 also
+    // adds revocable *per-user* tokens (Account → API tokens) that the MCP uses
+    // to act as a specific user under the per-book permission checks.
     'api_token' => $env('API_KEY', ''),
 
     // --- First-run bootstrap gate (Phase 17). The UI now uses real per-user

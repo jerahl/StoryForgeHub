@@ -1002,6 +1002,9 @@ function ensure_chapter_notes() {
         id $pk, book_id VARCHAR(40) NOT NULL, chapter_file VARCHAR(255) NOT NULL,
         quote TEXT, note TEXT, status VARCHAR(20) DEFAULT 'open', task_id INT DEFAULT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
+    // Phase 20: attribute a note to the collaborator who left it (notes stay shared
+    // within the book — they're review comments — but now carry an author).
+    try { db()->exec("ALTER TABLE chapter_notes ADD COLUMN user_id INT DEFAULT NULL"); } catch (Exception $e) {}
 }
 function get_chapter_notes($book_id, $file = null, $status = null) {
     ensure_chapter_notes();
@@ -1017,8 +1020,8 @@ function count_chapter_notes($book_id, $file, $status = 'open') {
 }
 function add_chapter_note($book_id, $file, $quote, $note) {
     ensure_chapter_notes();
-    q("INSERT INTO chapter_notes (book_id, chapter_file, quote, note, status) VALUES (?,?,?,?, 'open')",
-      [$book_id, $file, $quote, $note]);
+    q("INSERT INTO chapter_notes (book_id, chapter_file, quote, note, status, user_id) VALUES (?,?,?,?, 'open', ?)",
+      [$book_id, $file, $quote, $note, function_exists('current_user_id') ? current_user_id() : null]);
     return last_id();
 }
 function set_chapter_note_status($id, $status) {
@@ -1042,10 +1045,18 @@ function ensure_dictionary_terms() {
         id $pk, book_id VARCHAR(40) NOT NULL, term VARCHAR(190) NOT NULL,
         source VARCHAR(10) DEFAULT 'user', created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
     try { db()->exec("CREATE UNIQUE INDEX uniq_dict ON dictionary_terms (book_id, term)"); } catch (Exception $e) {}
+    // Phase 20: a writer's personal spell-check words shouldn't appear in a
+    // co-author's dictionary. Stamp the author; shared Codex proper nouns and
+    // pre-P20 (null) terms stay visible to everyone.
+    try { db()->exec("ALTER TABLE dictionary_terms ADD COLUMN user_id INT DEFAULT NULL"); } catch (Exception $e) {}
 }
 function get_dictionary_terms($book_id) {
     ensure_dictionary_terms();
-    return all("SELECT * FROM dictionary_terms WHERE book_id=? ORDER BY LOWER(term)", [$book_id]);
+    $uid = function_exists('current_user_id') ? current_user_id() : null;
+    if ($uid === null)   // unscoped (service token / CLI) — the whole book's dictionary
+        return all("SELECT * FROM dictionary_terms WHERE book_id=? ORDER BY LOWER(term)", [$book_id]);
+    return all("SELECT * FROM dictionary_terms WHERE book_id=? AND (user_id=? OR user_id IS NULL OR source='codex') ORDER BY LOWER(term)",
+               [$book_id, $uid]);
 }
 /** Just the term strings — handed to the editor for the client-side dictionary check. */
 function get_dictionary_words($book_id) {
@@ -1063,8 +1074,9 @@ function add_dictionary_term($book_id, $term, $source = 'user') {
     $len  = function_exists('mb_strlen') ? mb_strlen($term) : strlen($term);
     if ($term === '' || $len > 190) return false;
     if (dictionary_has($book_id, $term)) return false;
-    try { q("INSERT INTO dictionary_terms (book_id, term, source) VALUES (?,?,?)",
-        [$book_id, $term, $source === 'codex' ? 'codex' : 'user']); }
+    $uid = ($source === 'codex') ? null : (function_exists('current_user_id') ? current_user_id() : null);
+    try { q("INSERT INTO dictionary_terms (book_id, term, source, user_id) VALUES (?,?,?,?)",
+        [$book_id, $term, $source === 'codex' ? 'codex' : 'user', $uid]); }
     catch (Exception $e) { return false; }   // unique-index race
     return true;
 }

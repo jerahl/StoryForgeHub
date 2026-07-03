@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS chapter_notes (
   note         TEXT,                               -- the change to make
   status       VARCHAR(20) DEFAULT 'open',         -- open|resolved
   task_id      INT DEFAULT NULL,                   -- set when promoted to a Task
+  user_id      INT DEFAULT NULL,                   -- author of the note (Phase 20 attribution)
   created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
   KEY k_book_file (book_id, chapter_file)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -343,5 +344,23 @@ CREATE TABLE IF NOT EXISTS book_activity (
   created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
   KEY k_activity_book (book_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- api_tokens (Phase 20) — revocable per-user credentials for the MCP / automation.
+-- Only a SHA-256 hash of each token is stored; the raw token is shown once. When
+-- a request presents one, the API acts as that user under the P18/P19 checks.
+CREATE TABLE IF NOT EXISTS api_tokens (
+  id           INT AUTO_INCREMENT PRIMARY KEY,
+  user_id      INT          NOT NULL,
+  token_hash   VARCHAR(64)  NOT NULL,
+  label        VARCHAR(120) DEFAULT '',
+  created_at   DATETIME     DEFAULT CURRENT_TIMESTAMP,
+  last_used_at DATETIME     DEFAULT NULL,
+  revoked_at   DATETIME     DEFAULT NULL,
+  UNIQUE KEY uniq_api_token_hash (token_hash),
+  KEY k_api_token_user (user_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- dictionary_terms also gains user_id in Phase 20 (personal spell-check words);
+-- see src/repo.php ensure_dictionary_terms() for the additive migration.
 
 SET foreign_key_checks = 1;

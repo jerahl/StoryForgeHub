@@ -136,3 +136,11 @@ because a copy lives at `projects/books/.claude/skills/codex-webapp-sync/`.
   can't reach another book's data by id. Owners manage collaborators on each book's **Members**
   page (add existing accounts, invite new ones at a role, change roles, revoke), and a per-book
   **activity log** records who changed what. The Sync page and snapshot import are admin-only.
+- **Per-user API tokens** (Phase 20): the REST/MCP surface (`api.php`) takes two kinds of token.
+  The shared **service token** (`API_KEY`) stays unscoped for the PowerShell sync and admin
+  automation. Each user can also mint **personal tokens** from **Account → API tokens** — Claude
+  or the MCP presents one and the request *acts as that user*, so every read/write routes through
+  the same membership scoping and role checks (reach only your books, at your role; snapshot
+  import and cross-book access are refused). Only a hash of each token is stored, they're shown
+  once, and they're revocable. Per-user spell-check dictionary words no longer leak between
+  co-authors, and chapter notes record their author.

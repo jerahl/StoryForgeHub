@@ -519,6 +519,17 @@ if ($method === 'POST') {
         else { set_user_password((int)$me['id'], $_POST['password']); flash('Password changed.'); }
         redirect(['p'=>'account']);
     }
+    if ($a === 'account_token_create') {   // Phase 20: mint a per-user API token (Claude / MCP)
+        $raw = create_api_token(current_user_id(), $_POST['label'] ?? '');
+        $_SESSION['__new_token'] = $raw;   // shown exactly once on the account page
+        flash('Token created. Copy it now — it won’t be shown again.');
+        redirect(['p'=>'account']);
+    }
+    if ($a === 'account_token_revoke') {
+        revoke_api_token((int)($_POST['id'] ?? 0), current_user_id());
+        flash('Token revoked.');
+        redirect(['p'=>'account']);
+    }
 
     /* ---- admin: users & invites (Phase 17) ---- */
     if (strpos($a, 'admin_') === 0) {
@@ -2510,6 +2521,30 @@ case 'account':
        . '<label class="f">New password</label><input type="password" name="password" required>'
        . '<label class="f">Confirm new password</label><input type="password" name="password2" required>'
        . '<div class="toolbar"><button class="btn primary">Update password</button></div></form></div>';
+    // API tokens (Phase 20) — a per-user credential Claude / the MCP uses to act
+    // as you. Each token can read/write exactly the books you can.
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">API tokens (Claude / MCP)</h2>';
+    echo '<p class="muted" style="font-size:12.5px">A token lets Claude act as you through the MCP — it can reach only the books you\'re a member of, at your role. Treat it like a password; revoke it if it leaks.</p>';
+    if (!empty($_SESSION['__new_token'])) {
+        $nt = $_SESSION['__new_token']; unset($_SESSION['__new_token']);
+        echo '<div class="fieldtable"><div class="row"><div class="lbl">New token</div><div class="v mono" style="word-break:break-all">'.e($nt).'</div></div></div>';
+        echo '<p class="muted" style="font-size:12px">Copy it now — it is shown only once.</p>';
+    }
+    $toks = list_api_tokens((int)$me['id']);
+    if ($toks) {
+        echo '<table class="grid"><thead><tr><th>Label</th><th>Created</th><th>Last used</th><th></th></tr></thead><tbody>';
+        foreach ($toks as $t) {
+            echo '<tr><td>'.e($t['label'] ?: '—').'</td><td class="muted mono">'.e(substr((string)$t['created_at'],0,10)).'</td>'
+               . '<td class="muted mono">'.e($t['last_used_at'] ? substr($t['last_used_at'],0,16) : 'never').'</td>'
+               . '<td><form method="post" style="margin:0" onsubmit="return confirm(\'Revoke this token? Anything using it stops working.\')"><input type="hidden" name="action" value="account_token_revoke"><input type="hidden" name="id" value="'.(int)$t['id'].'"><button class="btn sm">Revoke</button></form></td></tr>';
+        }
+        echo '</tbody></table>';
+    } else {
+        echo '<p class="muted">No tokens yet.</p>';
+    }
+    echo '<form method="post" style="margin-top:12px"><input type="hidden" name="action" value="account_token_create">'
+       . '<label class="f">New token label (e.g. “Claude desktop”)</label><input type="text" name="label" placeholder="What is this token for?">'
+       . '<div class="toolbar"><button class="btn primary">Create token</button></div></form></div>';
     break;
 
 case 'admin_users':
