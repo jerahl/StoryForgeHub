@@ -32,7 +32,7 @@ class BuildPush(unittest.TestCase):
         k = entry_key("b1", "characters", "aria")
         # folder changed, db unchanged -> PUSH
         results = reconcile({k: "hNEW"}, {k: "hOLD"}, {k: "hOLD"})
-        payload, pending = cycle.build_push(self.root, results, {k: E("aria", "Aria")})
+        payload, pending, _ = cycle.build_push(self.root, results, {k: E("aria", "Aria")})
         self.assertEqual(len(payload), 1)
         files = payload[0]["files"]
         self.assertIn("Codex/Characters/aria.md", files)          # changed entry pushed
@@ -46,7 +46,7 @@ class BuildPush(unittest.TestCase):
     def test_no_entry_change_still_refreshes_folder_files(self):
         k = entry_key("b1", "characters", "aria")
         results = reconcile({k: "h"}, {k: "h"}, {k: "h"})         # NOOP entry
-        payload, pending = cycle.build_push(self.root, results, {k: E("aria", "Aria")})
+        payload, pending, _ = cycle.build_push(self.root, results, {k: E("aria", "Aria")})
         self.assertEqual(pending, {})                              # nothing to commit
         self.assertIn("Manuscript/ch01.md", payload[0]["files"])  # but folder files still refreshed
 

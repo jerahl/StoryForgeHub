@@ -189,7 +189,12 @@ function get_chapters($book_id, $includeArchived = false) {
     ensure_structure();   // guarantees the act_id column exists before we select it
     $w = "book_id=? AND LOWER(file) NOT LIKE '%readme.md'";
     if (!$includeArchived) $w .= " AND status<>'archived'";
-    return all("SELECT id,book_id,num,title,pov,status,words,word_count,summary,file,sort_order,act_id,grid_seq FROM chapters WHERE $w ORDER BY (num+0), num, file", [$book_id]);
+    // body_md5 is a same-source content fingerprint of the stored prose. The sync
+    // engine compares it against the baseline it recorded at the last successful
+    // sync to tell whether the DB copy of a chapter was edited in-app since then —
+    // so a fresh DB write is never clobbered by a stale folder copy. MD5 of the
+    // body (not updated_at, which also bumps on act/reorder/status changes).
+    return all("SELECT id,book_id,num,title,pov,status,words,word_count,summary,file,sort_order,act_id,grid_seq,MD5(COALESCE(body,'')) AS body_md5 FROM chapters WHERE $w ORDER BY (num+0), num, file", [$book_id]);
 }
 /** Chapters that have been archived (folder-removed or archived in the app). */
 function get_archived_chapters($book_id) {
