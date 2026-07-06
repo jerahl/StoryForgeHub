@@ -9,6 +9,7 @@
  *      checks, so the MCP can reach exactly the books that user could.
  */
 require_once dirname(__DIR__) . '/src/repo.php';  // src/ lives above the docroot
+require_once dirname(__DIR__) . '/src/oauth.php'; // OAuth access tokens (Track B3)
 header('Content-Type: application/json; charset=utf-8');
 
 $CFG = cfg();
@@ -22,6 +23,8 @@ if ($svc !== '' && $svc !== 'CHANGE_ME_TO_A_LONG_RANDOM_STRING' && hash_equals($
     $IS_SERVICE = true;                         // shared service token — unscoped
 } elseif ($u = user_for_api_token((string)$hdr)) {
     act_as_user($u);                            // per-user token — scoped to that user
+} elseif ($u = user_for_oauth_token((string)$hdr)) {
+    act_as_user($u);                            // OAuth access token (B3) — same scoping
 } else {
     out(['error' => 'unauthorized'], 401);
 }

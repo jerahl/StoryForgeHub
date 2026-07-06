@@ -42,11 +42,16 @@ CURRENT_TOKEN: contextvars.ContextVar[str] = contextvars.ContextVar("codex_token
 
 class TokenAuthMiddleware:
     """Pure ASGI (not BaseHTTPMiddleware): the downstream app runs in this same
-    context, so the contextvar set here is visible to the tool call it guards."""
+    context, so the contextvar set here is visible to the tool call it guards.
 
-    def __init__(self, app, gate: TokenGate):
+    When `public_url` is set, 401s carry the RFC 9728 discovery pointer so an
+    OAuth-capable client (Claude's connector UI, Track B3) can find the
+    authorization server and sign the user in instead of failing."""
+
+    def __init__(self, app, gate: TokenGate, public_url: str = ""):
         self.app = app
         self.gate = gate
+        self.public_url = public_url.rstrip("/")
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -55,7 +60,13 @@ class TokenAuthMiddleware:
         token = extract_token(request.headers.get("authorization", ""),
                               request.query_params.get("k", ""))
         if not self.gate.check(token):
-            return await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+            headers = {}
+            if self.public_url:
+                headers["WWW-Authenticate"] = (
+                    'Bearer resource_metadata='
+                    f'"{self.public_url}/.well-known/oauth-protected-resource"')
+            return await JSONResponse({"error": "unauthorized"}, status_code=401,
+                                      headers=headers)(scope, receive, send)
         ctx = CURRENT_TOKEN.set(token)
         try:
             await self.app(scope, receive, send)
@@ -63,8 +74,10 @@ class TokenAuthMiddleware:
             CURRENT_TOKEN.reset(ctx)
 
 
-def build_app(service_token: str, books_root: str, api_url: str, engine_dir: str | None = None):
-    """Build the Starlette ASGI app: stateless FastMCP + per-user token gate."""
+def build_app(service_token: str, books_root: str, api_url: str, engine_dir: str | None = None,
+              public_url: str = ""):
+    """Build the Starlette ASGI app: stateless FastMCP + per-user token gate.
+    `public_url` (e.g. https://<domain>) enables the OAuth discovery pointer on 401s."""
     api = CodexApi(api_url, lambda: CURRENT_TOKEN.get())
     tools = CodexTools(api, books_root, engine_dir)
 
@@ -182,7 +195,7 @@ def build_app(service_token: str, books_root: str, api_url: str, engine_dir: str
         return tools.sync(dry_run=dry_run, token=caller, api_url=api_url)
 
     app = mcp.streamable_http_app()
-    return TokenAuthMiddleware(app, gate)
+    return TokenAuthMiddleware(app, gate, public_url)
 
 
 def main() -> int:
@@ -191,7 +204,8 @@ def main() -> int:
         print("ERROR: API_KEY not set."); return 2
     books_root = os.environ.get("CODEX_BOOKS_DIR", "/srv/codex/books")
     api_url = os.environ.get("CODEX_API_URL", "http://127.0.0.1:8081/api.php")
-    app = build_app(token, books_root, api_url)
+    public_url = os.environ.get("CODEX_PUBLIC_URL", "")
+    app = build_app(token, books_root, api_url, public_url=public_url)
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8765)
     return 0

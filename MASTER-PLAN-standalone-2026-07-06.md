@@ -274,6 +274,20 @@ supports pluggable auth; implement **OAuth 2.1 + dynamic client registration** s
 ~1.5–2 sessions (the fiddly part is conformance with Claude's connector flow —
 budget for testing against a real Claude org).
 
+**Status (2026-07-06): DONE (pending a live-Claude conformance pass).** The app is
+now an OAuth 2.1 authorization server: `src/oauth.php` (clients/codes/grants tables
+via `ensure_oauth()`, hashes only, PKCE S256 enforced, single-use 5-min codes,
+1h access / 30d refresh, rotation with replay detection that revokes the grant) +
+`htdocs/oauth.php` (authorize with sign-in + consent screens riding the normal app
+session, token, RFC 7591 registration, RFC 8414/9728 metadata — served at
+`/.well-known/*` via Caddy rewrites). `api.php` accepts the access tokens through
+`user_for_oauth_token()` — same scoping path as personal tokens, so the MCP needed
+only the 401 `WWW-Authenticate` discovery pointer (`CODEX_PUBLIC_URL` in the unit
+template). Users manage grants at **Account → Connected apps**. Gates:
+`tests/php/oauth_test.php` (34 checks) and the e2e now drives the full dance —
+register → sign-in → deny → approve → exchange → MCP access as that user →
+refresh rotation → replay revokes the grant.
+
 ### B4 — Onboarding & the skill
 
 1. **"Connect Claude" panel** on the Account page: connector URL, mint-token button
@@ -286,6 +300,15 @@ budget for testing against a real Claude org).
 3. Docs page in-app ("Working with Claude") with worked examples.
 
 **Effort:** ~1 session.
+
+**Status (2026-07-06): DONE.** Account page gained a **Connect Claude** panel (the
+connector URL + OAuth-first instructions, token fallback) and a **Connected apps**
+table (OAuth grants with disconnect); a top-level **Working with Claude** page
+(`?p=claude`) walks through connect / capabilities / things-to-say. The skill is
+rewritten as **storyforge** (`skill-storyforge/` + packaged `storyforge.skill`):
+per-user identity, the granular tools (including claim-a-task via
+`codex_update_task(status="doing")` and diagnostics), no sync vocabulary; the old
+codex-webapp-sync skill is marked superseded in place.
 
 ---
 

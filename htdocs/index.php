@@ -542,6 +542,12 @@ if ($method === 'POST') {
         flash('Token revoked.');
         redirect(['p'=>'account']);
     }
+    if ($a === 'account_grant_revoke') {   // Track B3: disconnect an OAuth-connected app
+        require_once dirname(__DIR__) . '/src/oauth.php';
+        revoke_oauth_grant((int)($_POST['id'] ?? 0), current_user_id());
+        flash('App disconnected.');
+        redirect(['p'=>'account']);
+    }
 
     /* ---- admin: users & invites (Phase 17) ---- */
     if (strpos($a, 'admin_') === 0) {
@@ -592,7 +598,7 @@ if ($method === 'POST') {
 $p = $_GET['p'] ?? 'overview';
 $book_id = $_GET['book'] ?? null;
 $book = $book_id ? get_book($book_id) : null;
-$bookScoped = !in_array($p, ['library','sync','overview','account','admin_users'], true);
+$bookScoped = !in_array($p, ['library','sync','overview','account','admin_users','claude'], true);
 if (!$book && $bookScoped) { $bks = get_books(); $book = $bks[0] ?? null; $book_id = $book['id'] ?? null; }
 // A book-scoped page with no accessible book (e.g. a member requested a book they
 // can't see, or has none yet) — send them to the library rather than render an
@@ -605,7 +611,8 @@ $titles = ['overview'=>'Overview','library'=>'Library','book'=>$book['title']??'
            'threads'=>($book ? threads_label($book['profile'] ?? 'fiction')['title'] : 'Open threads'),
            'references'=>'References','exercises'=>'Exercises',
            'tasks'=>'Tasks','log'=>'Writing log','meta'=>'Meta','notes'=>'Notes','sync'=>'Sync','dictionary'=>'Dictionary',
-           'plot'=>'Plot board','vision'=>'Mood board','account'=>'Account','admin_users'=>'Users &amp; invites','members'=>'Members'];
+           'plot'=>'Plot board','vision'=>'Mood board','account'=>'Account','admin_users'=>'Users &amp; invites','members'=>'Members',
+           'claude'=>'Working with Claude'];
 layout_head($titles[$p] ?? 'Codex', $accent, $bodyType, $density, $mode);
 echo '<div class="app">';
 render_sidebar($book, $p, $_GET['db'] ?? null);
@@ -2543,6 +2550,33 @@ case 'sync':
     echo '<div class="toolbar"><a class="btn" href="api.php?action=export&token='.e($token).'" target="_blank">Download current snapshot.json</a></div></div>';
     break;
 
+case 'claude':   // Track B4 — the "Working with Claude" onboarding guide
+    $mcpUrl = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http')
+            . '://' . ($_SERVER['HTTP_HOST'] ?? 'your-host') . '/mcp';
+    echo '<div class="pagehead"><div><h1>Working with Claude</h1><p class="desc">Connect Claude to your Codex and it becomes a co-worker: it reads your entries and chapters, runs the tasks you flag, and logs your writing — as you, with your permissions.</p></div></div>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">1 · Connect</h2>'
+       . '<p style="font-size:13.5px">In Claude, open <strong>Settings → Connectors → Add custom connector</strong> and paste:</p>'
+       . '<div class="fieldtable"><div class="row"><div class="lbl">Connector URL</div><div class="v mono" style="word-break:break-all">'.e($mcpUrl).'</div></div></div>'
+       . '<p class="muted" style="font-size:12.5px;margin-top:8px">Claude will ask you to sign in with your account here and approve the connection — no keys to copy. (Fallback for older clients: mint a token on <a href="?p=account">Account</a> and use <span class="mono">'.e($mcpUrl).'?k=&lt;token&gt;</span>.) Enable the connector per-conversation from the <strong>+</strong> menu. You can disconnect any time from <a href="?p=account">Account → Connected apps</a>.</p></div>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">2 · What Claude can do</h2>'
+       . '<p style="font-size:13.5px">Everything is scoped to <em>your</em> books at <em>your</em> role, and every change lands in the book\'s activity log under your name. Claude can:</p>'
+       . '<ul style="font-size:13.5px;line-height:1.7;margin:6px 0 0 18px">'
+       . '<li><strong>Read</strong> — entries, chapters (full prose), search with snippets, and the Smart-editing diagnostics.</li>'
+       . '<li><strong>Write</strong> — create and update entries and chapters, keep the plot straight, fill the writing log.</li>'
+       . '<li><strong>Run your tasks</strong> — anything on the Tasks page flagged <em>for Claude</em>, and leave new tasks for you.</li>'
+       . '</ul></div>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">3 · Things to say</h2>'
+       . '<ul style="font-size:13.5px;line-height:1.8;margin:0 0 0 18px">'
+       . '<li>“Check my Codex for tasks and run them.”</li>'
+       . '<li>“Search my book for everything about the northern watchtower.”</li>'
+       . '<li>“Read chapter 4 and check it against Aria\'s entry for contradictions.”</li>'
+       . '<li>“Draft a Codex entry for the character I just described.”</li>'
+       . '<li>“Fill in my writing log for today.”</li>'
+       . '<li>“What do the diagnostics flag in chapter 2?”</li>'
+       . '</ul>'
+       . '<p class="muted" style="font-size:12.5px;margin-top:8px">House rules Claude follows: it never invents canon, never hard-deletes, and a refused save (someone else edited meanwhile) comes back to you instead of overwriting.</p></div>';
+    break;
+
 case 'account':
     $me = current_user();
     echo '<div class="pagehead"><div><h1>Account</h1><p class="desc">Your sign-in details for Stephen\'s Codex.</p></div>'
@@ -2559,9 +2593,31 @@ case 'account':
        . '<label class="f">New password</label><input type="password" name="password" required>'
        . '<label class="f">Confirm new password</label><input type="password" name="password2" required>'
        . '<div class="toolbar"><button class="btn primary">Update password</button></div></form></div>';
+    // Connect Claude (Track B4) — the front door for the MCP: OAuth sign-in
+    // (B3) as the main path, personal tokens as the fallback below.
+    $mcpUrl = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http')
+            . '://' . ($_SERVER['HTTP_HOST'] ?? 'your-host') . '/mcp';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Connect Claude</h2>';
+    echo '<p class="muted" style="font-size:12.5px">Claude can read and edit your books directly — your books, your role, your name in the activity log. In Claude go to <strong>Settings → Connectors → Add custom connector</strong> and paste this URL, then sign in with this account when Claude asks:</p>';
+    echo '<div class="fieldtable"><div class="row"><div class="lbl">Connector URL</div><div class="v mono" style="word-break:break-all">'.e($mcpUrl).'</div></div></div>';
+    echo '<p class="muted" style="font-size:12px;margin-top:8px">If your Claude can\'t sign in (older clients), create an API token below and use <span class="mono">'.e($mcpUrl).'?k=&lt;token&gt;</span> instead. See <a href="?p=claude">Working with Claude</a> for what to say once connected.</p>';
+    echo '</div>';
+    // Connected apps (Track B3) — OAuth grants; disconnecting kills the app's tokens.
+    require_once dirname(__DIR__) . '/src/oauth.php';
+    $grants = list_oauth_grants((int)$me['id']);
+    if ($grants) {
+        echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Connected apps</h2>';
+        echo '<table class="grid"><thead><tr><th>App</th><th>Connected</th><th>Last used</th><th></th></tr></thead><tbody>';
+        foreach ($grants as $g) {
+            echo '<tr><td>'.e($g['client_name'] ?: 'Unnamed app').'</td><td class="muted mono">'.e(substr((string)$g['created_at'],0,10)).'</td>'
+               . '<td class="muted mono">'.e($g['last_used_at'] ? substr($g['last_used_at'],0,16) : 'never').'</td>'
+               . '<td><form method="post" style="margin:0" onsubmit="return confirm(\'Disconnect this app? It will have to sign in again.\')"><input type="hidden" name="action" value="account_grant_revoke"><input type="hidden" name="id" value="'.(int)$g['id'].'"><button class="btn sm">Disconnect</button></form></td></tr>';
+        }
+        echo '</tbody></table></div>';
+    }
     // API tokens (Phase 20) — a per-user credential Claude / the MCP uses to act
     // as you. Each token can read/write exactly the books you can.
-    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">API tokens (Claude / MCP)</h2>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">API tokens (Claude / MCP fallback)</h2>';
     echo '<p class="muted" style="font-size:12.5px">A token lets Claude act as you through the MCP — it can reach only the books you\'re a member of, at your role. Treat it like a password; revoke it if it leaks.</p>';
     if (!empty($_SESSION['__new_token'])) {
         $nt = $_SESSION['__new_token']; unset($_SESSION['__new_token']);

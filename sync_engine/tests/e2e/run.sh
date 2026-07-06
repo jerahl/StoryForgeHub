@@ -23,7 +23,8 @@ python3 -c "
 import sys; sys.path.insert(0, '$REPO/sync_engine')
 import uvicorn
 from mcp_server import build_app
-app = build_app('e2e-service-key', '$WORK/no-books', 'http://127.0.0.1:8081/api.php')
+app = build_app('e2e-service-key', '$WORK/no-books', 'http://127.0.0.1:8081/api.php',
+                public_url='http://127.0.0.1:8081')
 uvicorn.run(app, host='127.0.0.1', port=8765, log_level='warning')
 " > "$WORK/mcp.log" 2>&1 &
 MCP_PID=$!

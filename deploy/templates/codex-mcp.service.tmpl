@@ -13,6 +13,8 @@ Group=www-data
 EnvironmentFile=${CODEX_ENV_FILE}
 Environment=CODEX_BOOKS_DIR=${CODEX_BOOKS_DIR}
 Environment=CODEX_API_URL=http://127.0.0.1:8081/api.php
+# Enables the OAuth discovery pointer on 401s (Track B3).
+Environment=CODEX_PUBLIC_URL=https://${CODEX_DOMAIN}
 WorkingDirectory=${CODEX_ENGINE_DIR}
 ExecStart=${CODEX_ENGINE_DIR}/.venv/bin/python ${CODEX_ENGINE_DIR}/mcp_server.py
 Restart=on-failure

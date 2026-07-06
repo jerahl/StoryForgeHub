@@ -143,7 +143,14 @@ function run_auth_gate() {
     $err = null;
     if ($action === 'auth_login') {
         $u = verify_login($_POST['email'] ?? '', $_POST['password'] ?? '');
-        if ($u) { login_user($u); header('Location: ' . (($_POST['next'] ?? '') ?: '?')); exit; }
+        if ($u) {
+            login_user($u);
+            // same-site paths only (the OAuth consent flow rides this) — never
+            // an absolute URL, so login can't be used as an open redirect.
+            $next = (string)($_POST['next'] ?? '');
+            if ($next === '' || $next[0] === '\\' || ($next[0] !== '/' && $next[0] !== '?') || strpos($next, '//') === 0) $next = '?';
+            header('Location: ' . $next); exit;
+        }
         $err = 'Wrong email or password.';
     }
 

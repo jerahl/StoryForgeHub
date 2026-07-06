@@ -150,11 +150,14 @@ because a copy lives at `projects/books/.claude/skills/codex-webapp-sync/`.
   import and cross-book access are refused). Only a hash of each token is stored, they're shown
   once, and they're revocable. Per-user spell-check dictionary words no longer leak between
   co-authors, and chapter notes record their author.
-- **Per-user MCP connectors** (standalone plan, Track B1): the remote MCP at
-  `https://<domain>/mcp` now takes personal tokens too, not just the service key — each
-  writer adds their own Claude connector with `https://<domain>/mcp?k=<personal token>`
-  and every tool call acts as them: their books, their role, their name in the activity
-  log. The tool surface includes granular reads (`codex_get_chapter` with the full body,
-  server-side `codex_search` with snippets, `codex_get_diagnostics`) and task
-  create/update, so "check the web app for tasks and run them" works per-user with no
-  folder sync involved. See `sync_engine/MCP-SERVER.md`.
+- **Per-user MCP connectors** (standalone plan, Tracks B1–B4): each writer connects
+  their own Claude to `https://<domain>/mcp` — just paste the URL and **sign in with
+  your account** when Claude asks (OAuth 2.1 with consent, revocable under
+  **Account → Connected apps**), or use the `?k=<personal token>` fallback from
+  **Account → API tokens**. Every tool call acts as that user: their books, their
+  role, their name in the activity log. The tool surface includes granular reads
+  (`codex_get_chapter` with the full body, server-side `codex_search` with snippets,
+  `codex_get_diagnostics`) and task create/update, so "check my Codex for tasks and
+  run them" works per-user with no folder sync involved. In-app guide: **Working
+  with Claude** (`?p=claude`); Claude-side skill: `storyforge.skill`; details:
+  `sync_engine/MCP-SERVER.md`.

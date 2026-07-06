@@ -74,18 +74,30 @@ curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $API_KEY" \
      -H "Accept: text/event-stream" https://<domain>/mcp            # not 401 = reachable
 ```
 
-## Connect Claude (token-in-URL)
-Each user mints their own token at **Account → API tokens**, then:
+## Connect Claude
+
+**OAuth sign-in (Track B3, the recommended path).** Add the connector with just
+the URL — no token:
 
   Customize -> Connectors -> "+" -> Add custom connector
-  URL:  https://<domain>/mcp?k=<personal token>
+  URL:  https://<domain>/mcp
 
-No OAuth/advanced settings needed (OAuth is the Track B3 upgrade). Enable it
-per-conversation via "+" -> Connectors. The server also accepts
-`Authorization: Bearer <token>` (used by mcp_smoke.py and SDK clients). Caddy
-`log_skip`s /mcp so tokens aren't written to the access log. Tokens are
-revocable per-user on the Account page; rotate the service `API_KEY` if it is
-ever exposed.
+Claude gets a 401 whose `WWW-Authenticate` points at
+`/.well-known/oauth-protected-resource` (served by `oauth.php` via a Caddy
+rewrite), discovers the app's authorization server (RFC 8414), registers itself
+(RFC 7591 dynamic client registration, public client + PKCE S256), and sends
+the user to the app's sign-in + consent screen. The issued access token is a
+bearer `api.php` resolves like a personal token (`user_for_oauth_token`), so
+the pass-through and scoping are identical. Refresh tokens rotate on every use;
+a replayed refresh token revokes the whole grant. Users see and disconnect
+their grants at **Account → Connected apps**.
+
+**Token-in-URL (fallback for clients without OAuth).** Mint a token at
+**Account → API tokens**, then use `https://<domain>/mcp?k=<personal token>`.
+The server also accepts `Authorization: Bearer <token>` (used by mcp_smoke.py
+and SDK clients). Caddy `log_skip`s /mcp so tokens aren't written to the access
+log. Tokens are revocable per-user on the Account page; rotate the service
+`API_KEY` if it is ever exposed.
 
 ## Tests
 - Offline unit: `python3 -m unittest discover -s sync_engine/tests`
@@ -99,9 +111,9 @@ ever exposed.
 - On-box smoke: `mcp_smoke.py` (unchanged; works with either token kind).
 
 ## Notes / next
-- OAuth 2.1 + dynamic client registration for Claude connectors is Track B3
-  (FastMCP supports a `token_verifier`/`auth` provider when we want it);
-  token-in-URL stays as the fallback.
+- OAuth (B3) is implemented app-side (`src/oauth.php` + `htdocs/oauth.php`);
+  conformance against a live Claude org still needs a manual pass on the
+  deployed box (the e2e drives the same flow with the SDK + httpx).
 - `codex_get_entry`/`codex_list_chapters`/`codex_status` still read the whole
   `export` snapshot — fine at this size; move them to granular actions if it
   grows.
