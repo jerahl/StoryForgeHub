@@ -115,9 +115,11 @@ for reference.
 
 ## Daily use
 
-- **Browse / edit** anything in the web app. Entries are edited as Codex markdown (the
-  app shows a clean view and an Edit screen); saving re-parses and the next sync writes
-  it back to the right folder verbatim.
+- **Browse / edit** anything in the web app — including chapters, in a true rich-text
+  editor (Track C): wiki-links render as chips, author notes (`<!-- … -->`) as visible
+  pills, scene breaks as ornaments, and a toggle flips to raw Markdown any time. The
+  round-trip seatbelt guarantees rich mode can never mangle the dialect; every save is
+  a restorable revision.
 - **Flag work for Claude:** web app → **Tasks** → write a task, tick *Flag for Claude*.
   Then tell Claude: **"check the web app for tasks and run them."** Claude runs each task
   against the Codex, and the next sync marks it done and uploads the changes.

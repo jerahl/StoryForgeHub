@@ -45,6 +45,7 @@ function book_gate($a) {
               their writes to that book, so the field is authoritative here) --- */
         case 'entry_save': case 'entry_new': case 'entry_delete': case 'meta_save':
         case 'entry_revision_restore':   // A1: restore = a new save, same capability
+        case 'note_save':                // C3: notes are editable in-app now
         case 'task_save': case 'log_add': case 'scene_label': case 'progression_when':
         case 'reindex_mentions': case 'chapter_save': case 'chapter_new': case 'chapter_import':
         case 'dictionary_add': case 'dictionary_remove': case 'dictionary_import_codex':
@@ -195,6 +196,12 @@ if ($method === 'POST') {
         save_meta_page($book, $_POST['slug'], $_POST['title'], $_POST['body']);
         flash('Meta page saved.');
         redirect(['p'=>'meta_page','book'=>$book,'slug'=>$_POST['slug']]);
+    }
+    if ($a === 'note_save') {   // Track C3: notes are DB-canonical now — editable in-app
+        save_note_page($book, $_POST['slug'], $_POST['title'], $_POST['body']);
+        log_activity($book, 'note_save', $_POST['slug']);
+        flash('Note saved.');
+        redirect(['p'=>'note_page','book'=>$book,'slug'=>$_POST['slug']]);
     }
     if ($a === 'task_save') {
         save_task(['id'=>$_POST['id']?:null,'book_id'=>$book,'title'=>$_POST['title'],'body'=>$_POST['body'],
@@ -1011,7 +1018,7 @@ case 'entry_edit':
     $relRaw = $e['relatedRaw'] ?? '';
     if ($relRaw === '' && !empty($e['related'])) $relRaw = implode(', ', array_map(function($r){return '[[' . $r . ']]';}, $e['related']));
 
-    echo '<div class="pagehead">'.db_chip($db).'<div><h1>Edit · '.e($e['name']).'</h1><p class="desc">Edit metadata in the fields; write prose in the editor. Saving assembles the Codex markdown and re-parses it; the next sync writes it back to your folder.</p></div></div>';
+    echo '<div class="pagehead">'.db_chip($db).'<div><h1>Edit · '.e($e['name']).'</h1><p class="desc">Edit metadata in the fields; write prose in the editor. Saving assembles the Codex markdown and re-parses it — every save is a restorable revision.</p></div></div>';
     echo '<form method="post" id="entry-form"><input type="hidden" name="action" value="entry_save"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="db" value="'.e($db).'"><input type="hidden" name="slug" value="'.e($slug).'">';
     // hidden field actually submitted; prefilled with current md so a no-JS submit is a safe no-op
     echo '<textarea id="md-out" name="md" style="display:none">'.e($md).'</textarea>';
@@ -1065,7 +1072,7 @@ case 'manuscript':
     $ch = get_chapters($book['id']);
     $arch = get_archived_chapters($book['id']);
     $view = (($_GET['view'] ?? '') === 'grid') ? 'grid' : 'list';
-    echo '<div class="pagehead"><div><h1>Manuscript</h1><p class="desc">'.count($ch).' chapters · '.number_format($book['wordCount']).' words. Click a chapter to read it; set its status below. Prose is authored in your folders and synced in.</p></div></div>';
+    echo '<div class="pagehead"><div><h1>Manuscript</h1><p class="desc">'.count($ch).' chapters · '.number_format($book['wordCount']).' words. Click a chapter to read it, or edit it right here — rich text or Markdown, your call.</p></div></div>';
     echo '<div class="toolbar"><a class="btn sm'.($view==='list'?' primary':'').'" href="'.url(['p'=>'manuscript','book'=>$book['id']]).'">List</a>'
        . '<a class="btn sm'.($view==='grid'?' primary':'').'" href="'.url(['p'=>'manuscript','book'=>$book['id'],'view'=>'grid']).'">Grid</a>'
        . '<form method="post" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="reindex_mentions"><input type="hidden" name="book" value="'.e($book['id']).'"><button class="btn sm" title="Rebuild the name/alias mention index for this book">Reindex mentions</button></form>'
@@ -1548,8 +1555,7 @@ HTML;
 case 'chapter_edit':
     $c = get_chapter($_GET['id']);
     if (!$c || $c['book_id'] !== $book['id']) { echo '<p class="empty">Chapter not found.</p>'; break; }
-    if (!(cfg()['books_dir'] ?? '')) { echo '<p class="empty">Chapter editing is disabled on this server.</p>'; break; }
-    echo '<div class="pagehead"><div><h1>Edit · '.e($c['title']).'</h1><p class="desc">Edit the chapter prose (Markdown). Saving writes it back to <span class="mono">Manuscript/'.e($c['file']).'</span> and the database. A timestamped backup is kept in <span class="mono">Manuscript/_backups/</span>; if the file changed on disk since you opened it, the save is refused (no overwrite). Keystrokes autosave to a recoverable draft; spell check uses your browser plus this book’s <a href="'.url(['p'=>'dictionary','book'=>$book['id']]).'">custom dictionary</a>.</p></div></div>';
+    echo '<div class="pagehead"><div><h1>Edit · '.e($c['title']).'</h1><p class="desc">Write in rich text or raw Markdown — the same prose either way (toggle any time). Every save is a revision you can restore; if someone else saved first, your save is refused and your draft is kept. Keystrokes autosave to a recoverable draft; spell check uses your browser plus this book’s <a href="'.url(['p'=>'dictionary','book'=>$book['id']]).'">custom dictionary</a>.</p></div></div>';
 
     // Phase 21: take an advisory soft lock and surface anyone else in this chapter.
     touch_edit_lock($book['id'], (int)$c['id'], current_user_id());
@@ -1630,7 +1636,9 @@ CSS;
     echo '<button class="btn primary" type="submit">Save prose</button>';
     echo '<a class="btn" href="'.url(['p'=>'chapter','book'=>$book['id'],'id'=>$c['id']]).'">Cancel</a>';
     echo '<span class="ed-sep"></span>';
-    echo '<button type="button" class="btn sm" id="btnFind" title="Find &amp; replace (Ctrl/⌘-F)">Find</button>';
+    echo '<button type="button" class="btn sm" id="wysToggle" title="Switch editor mode">Rich text</button>';
+    echo '<span class="ed-sep"></span>';
+    echo '<button type="button" class="btn sm" id="btnFind" title="Find &amp; replace (Ctrl/⌘-F) — raw Markdown view">Find</button>';
     echo '<button type="button" class="btn sm" id="btnStyle" title="Local style check">Style</button>';
     if ($revs) echo '<button type="button" class="btn sm" id="btnRevs">History ('.count($revs).')</button>';
     echo '<span class="ed-status" id="edStatus">Saved</span>';
@@ -1663,8 +1671,13 @@ CSS;
        . '<button type="button" data-md="quote" title="Blockquote">&ldquo;</button>'
        . '<button type="button" data-md="ul" title="Bulleted list">&bull;</button>'
        . '<button type="button" data-md="ol" title="Numbered list" style="font-size:12px">1.</button>'
+       . '<button type="button" data-md="break" title="Scene break (***)">&#8258;</button>'
        . '<button type="button" data-md="link" title="Link">&#128279;</button>'
        . '</div>';
+    // Track C2: the rich view mounts here; the textarea below stays the buffer
+    // of record (autosave, style check, rail, word count all read/write it).
+    echo '<p class="wys-notice" id="wysNotice" hidden>Rich text will tidy blank-line spacing on save — the prose itself is untouched, and every save is a restorable revision.</p>';
+    echo '<div id="chapter-wys" hidden></div>';
     echo '<textarea id="chapter-md" name="md" spellcheck="true" style="width:100%;min-height:62vh;font-family:var(--mono);font-size:13px;line-height:1.5">'.e($c['body']).'</textarea>';
     // Local style-check results (hidden until toggled)
     echo '<div class="ed-style" id="edStyle" hidden><div class="ed-style-h">Style check <span class="muted" id="edStyleN"></span></div><div id="edStyleList"></div></div>';
@@ -1956,7 +1969,7 @@ JS;
     h2:function(){prefixLines('## ');}, quote:function(){prefixLines('> ');},
     ul:function(){prefixLines('- ');}, ol:function(){prefixLines('',true);}, link:link
   };
-  bar.addEventListener('mousedown', function(ev){ var b=ev.target.closest('button[data-md]'); if(!b)return; ev.preventDefault(); (actions[b.dataset.md]||function(){})(); });
+  bar.addEventListener('mousedown', function(ev){ if(document.body.classList.contains('wys-rich')) return; var b=ev.target.closest('button[data-md]'); if(!b)return; ev.preventDefault(); (actions[b.dataset.md]||function(){})(); });
   ta.addEventListener('keydown', function(e){
     if(!(e.ctrlKey||e.metaKey)||e.altKey) return;
     var k=e.key.toLowerCase();
@@ -1966,6 +1979,10 @@ JS;
   });
 })();</script>
 JS;
+    // Track C2: the rich editor bundle (mounts on #chapter-wys; the seatbelt
+    // decides whether rich mode is allowed, the toggle flips the views).
+    $ev = @filemtime(__DIR__ . '/assets/app/editor.js') ?: time();
+    echo '<link rel="stylesheet" href="assets/app/editor.css?v='.$ev.'"><script src="assets/app/editor.js?v='.$ev.'" defer></script>';
     break;
 
 case 'dictionary':
@@ -2382,8 +2399,13 @@ case 'meta_page':
     if ($edit) {
         echo '<form method="post"><input type="hidden" name="action" value="meta_save"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="slug" value="'.e($mp['slug']).'">';
         echo '<label class="f">Title</label><input type="text" name="title" value="'.e($mp['title']).'">';
-        echo '<label class="f">Body (markdown)</label><textarea name="body">'.e($mp['body']).'</textarea>';
+        echo '<label class="f">Body</label>';
+        echo '<div class="toolbar" style="margin:4px 0"><button type="button" class="btn sm" id="metaToggle">Rich text</button></div>';
+        echo '<div class="wys" data-for="meta-body" data-toggle="metaToggle" hidden></div>';
+        echo '<textarea id="meta-body" name="body" style="min-height:40vh">'.e($mp['body']).'</textarea>';
         echo '<div class="toolbar"><button class="btn primary">Save</button><a class="btn" href="'.url(['p'=>'meta_page','book'=>$book['id'],'slug'=>$mp['slug']]).'">Cancel</a></div></form>';
+        $ev = @filemtime(__DIR__ . '/assets/app/editor.js') ?: time();
+        echo '<link rel="stylesheet" href="assets/app/editor.css?v='.$ev.'"><script src="assets/app/editor.js?v='.$ev.'" defer></script>';
     } else {
         echo '<div class="toolbar"><a class="btn sm" href="'.url(['p'=>'meta_page','book'=>$book['id'],'slug'=>$mp['slug'],'edit'=>1]).'">Edit</a></div>';
         echo '<div class="entrybody">'.md_to_html($mp['body'], $book['id']).'</div>';
@@ -2392,8 +2414,8 @@ case 'meta_page':
 
 case 'notes':
     $pages = get_notes($book['id']);
-    echo '<div class="pagehead"><div><h1>Notes</h1><p class="desc">Planning docs from your Codex <span class="kbd">Notes</span> folder — outline, beats, research. Read-only here; authored in your folders and synced in.</p></div></div>';
-    if (!$pages) { echo '<p class="empty">No notes synced yet. Add markdown under <span class="mono">Codex/Notes/</span> and run a sync.</p>'; break; }
+    echo '<div class="pagehead"><div><h1>Notes</h1><p class="desc">Planning docs — outline, beats, research. Editable here (Track C3); they export as <span class="kbd">Codex/Notes/*.md</span>.</p></div></div>';
+    if (!$pages) { echo '<p class="empty">No notes yet.</p>'; break; }
     echo '<div class="cards">';
     foreach ($pages as $np) echo '<a class="card" href="'.url(['p'=>'note_page','book'=>$book['id'],'slug'=>$np['slug']]).'"><div class="ctitle">'.e($np['title']).'</div><div class="clog mono" style="font-size:12px">Codex/Notes/'.e($np['slug']).'.md</div><div class="clog">'.e(mb_substr(trim(strip_tags($np['body'])),0,120)).'…</div></a>';
     echo '</div>';
@@ -2402,9 +2424,28 @@ case 'notes':
 case 'note_page':
     $np = get_note_page($book['id'], $_GET['slug']);
     if (!$np) { echo '<p class="empty">Not found.</p>'; break; }
-    echo '<div class="pagehead"><div><h1>'.e($np['title']).'</h1><p class="desc mono" style="font-size:12px">Codex/Notes/'.e($np['slug']).'.md · folder-authored (read-only)</p></div></div>';
-    echo '<div class="toolbar"><a class="btn sm" href="'.url(['p'=>'notes','book'=>$book['id']]).'">← All notes</a></div>';
-    echo '<div class="entrybody">'.md_to_html($np['body'], $book['id']).'</div>';
+    $edit = isset($_GET['edit']) && user_can($book['id'], 'edit');
+    echo '<div class="pagehead"><div><h1>'.e($np['title']).'</h1><p class="desc mono" style="font-size:12px">Codex/Notes/'.e($np['slug']).'.md</p></div></div>';
+    if ($edit) {
+        echo '<form method="post"><input type="hidden" name="action" value="note_save"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="slug" value="'.e($np['slug']).'">';
+        echo '<label class="f">Title</label><input type="text" name="title" value="'.e($np['title']).'">';
+        echo '<label class="f">Body</label>';
+        echo '<div class="toolbar" style="margin:4px 0"><button type="button" class="btn sm" id="noteToggle">Rich text</button></div>';
+        echo '<div class="wys" data-for="note-body" data-toggle="noteToggle" data-mentions hidden></div>';
+        echo '<textarea id="note-body" name="body" style="min-height:50vh">'.e($np['body']).'</textarea>';
+        echo '<div class="toolbar"><button class="btn primary">Save</button><a class="btn" href="'.url(['p'=>'note_page','book'=>$book['id'],'slug'=>$np['slug']]).'">Cancel</a></div></form>';
+        $tg = function_exists('build_mention_targets')
+            ? array_map(function($t){ return ['phrase'=>$t['phrase'],'slug'=>$t['slug']]; }, build_mention_targets($book['id']))
+            : [];
+        echo '<script>window.__scene='.json_encode(['book'=>$book['id'],'targets'=>$tg], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).';</script>';
+        $ev = @filemtime(__DIR__ . '/assets/app/editor.js') ?: time();
+        echo '<link rel="stylesheet" href="assets/app/editor.css?v='.$ev.'"><script src="assets/app/editor.js?v='.$ev.'" defer></script>';
+    } else {
+        echo '<div class="toolbar"><a class="btn sm" href="'.url(['p'=>'notes','book'=>$book['id']]).'">← All notes</a>'
+           . (user_can($book['id'], 'edit') ? '<a class="btn sm" href="'.url(['p'=>'note_page','book'=>$book['id'],'slug'=>$np['slug'],'edit'=>1]).'">Edit</a>' : '')
+           . '</div>';
+        echo '<div class="entrybody">'.md_to_html($np['body'], $book['id']).'</div>';
+    }
     break;
 
 case 'plot':

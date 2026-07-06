@@ -409,6 +409,19 @@ dialect depends on. Fix it at the schema level:
 
 **Effort:** ~1.5 sessions. **Blocks:** C2/C3.
 
+**Status (2026-07-06): DONE.** `editor/src/codex-md.js`: WikiLink atomic chip
+(kills the regex un-escape), inline + block CodexComment nodes (writers SEE
+their notes as pills; multi-line block comments byte-exact), SceneBreak that
+remembers the exact source marker (even `* * *`, recovered from the normalized
+source via token.map), a real Link mark (stock StarterKit silently DROPPED
+`[text](url)` URLs — found and fixed here), and `serializeCodex()` with
+isolated-only unescapes (`\_\_dunder\_\_` can never mint `__bold__`). The
+corpus gate (`editor/npm test`, jsdom + the real TipTap editor) has three
+tiers: byte-stable fixtures, **real seed.json chapters/entries** allowed only
+to tidy blank lines (equal line signatures + fixed point), and normalizing
+edge cases. The runtime seatbelt classifies each document stable/tidy/lossy
+and locks rich mode off for lossy ones.
+
 ### C2 — Manuscript WYSIWYG (the Write mode, completed)
 
 Swap the chapter textarea for the hardened TipTap in the P9 focused writing view —
@@ -430,6 +443,20 @@ this is the payoff feature:
 **Depends:** C1, A2 (pure-DB saves). **Effort:** ~1.5–2 sessions incl. real browser
 testing (the standing gap — several P9 slices shipped "not browser-tested").
 
+**Status (2026-07-06): DONE — and browser-tested for real.** Design choice: the
+chapter textarea stays the buffer of record and TipTap mounts as a
+**write-through rich view** (every update serializes into the textarea and
+fires `input`), so the entire Phase 15 toolchain — autosave, style check, the
+live scene rail, word count, draft recovery — kept working untouched. A
+Rich/Markdown toggle flips two views over the same buffer (per-user
+preference; Find/Style drop to raw where they operate); the md-toolbar drives
+whichever mode is active; the seatbelt notice covers the tidy tier and locks
+rich off for lossy documents. Saves ride the same conflict-guarded
+`chapter_save`. The leftover `books_dir` gate on chapter_edit fell with it.
+Verified end-to-end in **headless Chromium** (`editor/test/run-browser.sh`,
+Playwright driving the real PHP app): mount, write-through, toolbar, toggle,
+save, and dialect constructs surviving a rich save byte-exactly — 20 checks.
+
 ### C3 — Every remaining textarea
 
 Convert `entry_new` (reuse the entry_edit wiring), meta pages, notes, chapter notes,
@@ -437,6 +464,16 @@ task descriptions, progressions. One shared bundle, per-context config (which no
 which toolbar). Delete the "convert them next" debt from `editor/README.md`.
 
 **Effort:** ~1 session.
+
+**Status (2026-07-06): core DONE.** A generic write-through mount
+(`div.wys[data-for=<textarea>]` + toggle) converts any markdown textarea; meta
+pages use it, and **notes became editable in-app** (new `note_save` action +
+Edit UI — they were folder-authored read-only before the flip). `entry_new`
+needed no conversion (it's a name/slug form; prose editing happens in
+entry_edit, which now runs on the hardened layer — mention-click inserts a
+WikiLink node). Folder-era copy on the manuscript/notes/entry pages updated.
+Still open (fold into C4): chapter notes and task descriptions (plain
+textareas, low-stakes), progressions.
 
 ### C4 — Editor niceties (post-parity polish, pick-and-choose)
 

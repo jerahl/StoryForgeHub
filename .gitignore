@@ -5,3 +5,6 @@
 # Python bytecode (never commit)
 __pycache__/
 *.pyc
+
+# Editor toolchain (build with editor/README instructions)
+node_modules/

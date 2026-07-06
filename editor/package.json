@@ -2,11 +2,19 @@
   "name": "codex-editor",
   "private": true,
   "type": "module",
-  "scripts": { "build": "vite build" },
+  "scripts": {
+    "build": "vite build",
+    "test": "node --test \"test/*.test.mjs\""
+  },
   "dependencies": {
     "@tiptap/core": "^2.11.5",
+    "@tiptap/extension-link": "^2.27.2",
     "@tiptap/starter-kit": "^2.11.5",
     "tiptap-markdown": "^0.8.10"
   },
-  "devDependencies": { "vite": "^5.4.11" }
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "playwright": "^1.61.1",
+    "vite": "^5.4.11"
+  }
 }
