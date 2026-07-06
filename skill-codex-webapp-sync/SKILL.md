@@ -12,6 +12,14 @@ description: >-
 
 # codex-webapp-sync
 
+> ⚠ **SUPERSEDED (2026-07-06, standalone plan Track B4)** by the **storyforge**
+> skill (`skill-storyforge/` / `storyforge.skill`): per-user connectors (OAuth or
+> personal token, never the shared API_KEY), the granular tool surface
+> (`codex_get_chapter`, server-side `codex_search`, `codex_create_task`,
+> `codex_update_task`, `codex_get_diagnostics`), and no sync vocabulary.
+> Install storyforge for new setups; this file stays for reference until the
+> old install is retired.
+
 The Claude-side worker for Stephen's Codex. It talks to the app **directly through
 the Codex MCP connector** (the `codex_*` tools). There is no longer a bridge folder
 or a PowerShell scheduled task — continuous folder↔DB sync runs on the server

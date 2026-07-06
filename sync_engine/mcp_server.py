@@ -1,15 +1,26 @@
 """
-mcp_server.py — remote MCP tool surface for Stephen's Codex (MASTER-PLAN Phase 3).
+mcp_server.py — remote MCP tool surface for Stephen's Codex.
 
-Streamable-HTTP MCP server (FastMCP), bound to loopback 127.0.0.1:8765 and fronted
-by Caddy at https://<domain>/mcp. A static bearer token (the app's API_KEY) gates
-every request via ASGI middleware — Claude connects as a remote MCP connector
-configured with that token. (OAuth per-client is a later upgrade.)
+Streamable-HTTP MCP server (FastMCP), bound to loopback 127.0.0.1:8765 and
+fronted by Caddy at https://<domain>/mcp.
+
+Auth (standalone plan, Track B1 — per-user): every request must carry a token
+(`Authorization: Bearer` or `?k=` for Claude's URL-only connector UI). The
+shared service API_KEY still works and stays unscoped (admin automation); any
+other value is validated against api.php as a personal token from
+Account → API tokens, and — the point — is passed through as the X-Codex-Token
+on every api.php call, so the request acts as that user: same book membership
+scoping, same role checks, same activity-log attribution as the web UI.
+
+The server runs stateless (no MCP session affinity), so each tool call executes
+inside the HTTP request that carried it and the caller's token rides a
+contextvar from the auth middleware into the api client.
 
 Run (under the venv python, by the codex-mcp systemd unit):
     API_KEY=... CODEX_BOOKS_DIR=/srv/codex/books python -m sync_engine.mcp_server
 """
 from __future__ import annotations
+import contextvars
 import os
 import sys
 
@@ -17,28 +28,79 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http import TransportSecuritySettings
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from api_client import CodexApi, ApiError
+from mcp_auth import TokenGate, extract_token
 from mcp_tools import CodexTools
 
+# The authenticated caller's token for the request being served. Set by the
+# auth middleware, read by the CodexApi token provider on every api.php call.
+CURRENT_TOKEN: contextvars.ContextVar[str] = contextvars.ContextVar("codex_token", default="")
 
-def build_app(token: str, books_root: str, api_url: str, engine_dir: str | None = None):
-    """Build the Starlette ASGI app: FastMCP streamable-http + bearer gate."""
-    api = CodexApi(api_url, token)
+
+class TokenAuthMiddleware:
+    """Pure ASGI (not BaseHTTPMiddleware): the downstream app runs in this same
+    context, so the contextvar set here is visible to the tool call it guards.
+
+    When `public_url` is set, 401s carry the RFC 9728 discovery pointer so an
+    OAuth-capable client (Claude's connector UI, Track B3) can find the
+    authorization server and sign the user in instead of failing."""
+
+    def __init__(self, app, gate: TokenGate, public_url: str = ""):
+        self.app = app
+        self.gate = gate
+        self.public_url = public_url.rstrip("/")
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        request = Request(scope)
+        token = extract_token(request.headers.get("authorization", ""),
+                              request.query_params.get("k", ""))
+        if not self.gate.check(token):
+            headers = {}
+            if self.public_url:
+                headers["WWW-Authenticate"] = (
+                    'Bearer resource_metadata='
+                    f'"{self.public_url}/.well-known/oauth-protected-resource"')
+            return await JSONResponse({"error": "unauthorized"}, status_code=401,
+                                      headers=headers)(scope, receive, send)
+        ctx = CURRENT_TOKEN.set(token)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            CURRENT_TOKEN.reset(ctx)
+
+
+def build_app(service_token: str, books_root: str, api_url: str, engine_dir: str | None = None,
+              public_url: str = ""):
+    """Build the Starlette ASGI app: stateless FastMCP + per-user token gate.
+    `public_url` (e.g. https://<domain>) enables the OAuth discovery pointer on 401s."""
+    api = CodexApi(api_url, lambda: CURRENT_TOKEN.get())
     tools = CodexTools(api, books_root, engine_dir)
+
+    def validate(candidate: str) -> bool:
+        try:
+            CodexApi(api_url, candidate).ping()
+            return True
+        except ApiError:
+            return False
+
+    gate = TokenGate(service_token, validate)
     mcp = FastMCP("codex", host="127.0.0.1", port=8765, streamable_http_path="/mcp",
+                  stateless_http=True,
                   transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
 
     @mcp.tool()
     def codex_status() -> dict:
-        """Health + counts: app name, books, entries, chapters."""
+        """Health + counts: app name, and the books/entries/chapters you can see."""
         return tools.status()
 
     @mcp.tool()
     def codex_search(query: str, book: str | None = None, limit: int = 25) -> list:
-        """Search entries by name/slug/fields/sections text. Returns matches."""
+        """Search entries, chapters, and notes (server-side, with snippets)."""
         return tools.search(query, book, limit)
 
     @mcp.tool()
@@ -47,17 +109,38 @@ def build_app(token: str, books_root: str, api_url: str, engine_dir: str | None 
         return tools.get_entry(book, db, slug) or "(not found)"
 
     @mcp.tool()
+    def codex_list_entries(book: str, db: str | None = None) -> list:
+        """List a book's entries (db, slug, name, status, type) without bodies."""
+        return tools.list_entries(book, db)
+
+    @mcp.tool()
     def codex_save_entry(book: str, db: str, slug: str, markdown: str) -> dict:
-        """Save (create/update) an entry from Markdown via api.php push."""
+        """Save (create/update) an entry from Markdown."""
         return tools.save_entry(book, db, slug, markdown)
 
     @mcp.tool()
+    def codex_get_chapter(book: str, chapter_id: int | None = None,
+                          file: str | None = None) -> dict:
+        """Read one manuscript chapter INCLUDING its Markdown body, by id or by
+        filename (e.g. 'ch01.md'). Also returns num/title/status/words."""
+        return tools.get_chapter(book, chapter_id, file)
+
+    @mcp.tool()
     def codex_save_chapter(book: str, filename: str, markdown: str,
-                           reconcile: bool = False) -> dict:
-        """Create/update a manuscript chapter from Markdown. filename is a bare
-        name (e.g. 'ch-05-the-wall.md'). Adding a chapter never archives the
-        others unless reconcile=True (which archives chapters absent from books)."""
-        return tools.save_chapter(book, filename, markdown, reconcile)
+                           base_hash: str = "") -> dict:
+        """Create/update a manuscript chapter. filename is a bare name (e.g.
+        'ch-05-the-wall.md'). Creating a new chapter needs no base_hash; to
+        UPDATE an existing one you must pass the body_hash you got from
+        codex_get_chapter — if the chapter moved meanwhile the save is refused
+        and the result carries the current hash + body so you can merge and
+        retry. Never save over prose you haven't read."""
+        return tools.save_chapter(book, filename, markdown, base_hash)
+
+    @mcp.tool()
+    def codex_create_chapter(book: str, title: str, num: str = "") -> dict:
+        """Create a new, empty titled chapter (ch-NN-title.md seeded with its
+        heading). num defaults to one past the highest existing chapter."""
+        return tools.create_chapter(book, title, num)
 
     @mcp.tool()
     def codex_push_files(book: str, files: dict, reconcile_chapters: bool = False) -> dict:
@@ -74,10 +157,30 @@ def build_app(token: str, books_root: str, api_url: str, engine_dir: str | None 
         return tools.list_chapters(book)
 
     @mcp.tool()
+    def codex_get_diagnostics(book: str, chapter_id: int) -> dict:
+        """Prose diagnostics for a chapter — overused words, repeated phrases,
+        patterns to review, dialogue tags — the app's Smart-editing data."""
+        return tools.get_diagnostics(book, chapter_id)
+
+    @mcp.tool()
     def codex_get_tasks(book: str | None = None, for_claude: int | None = None,
                         status: str | None = None) -> list:
         """List tasks, optionally filtered (for_claude=1, status=todo)."""
         return tools.get_tasks(book, for_claude, status)
+
+    @mcp.tool()
+    def codex_create_task(book: str, title: str, body: str = "",
+                          for_claude: bool = False, priority: str = "med") -> dict:
+        """Create a task on a book's Tasks page (priority: low|med|high).
+        for_claude=True flags it for a future Claude session to pick up."""
+        return tools.create_task(book, title, body, for_claude, priority)
+
+    @mcp.tool()
+    def codex_update_task(task_id: int, status: str | None = None,
+                          result: str | None = None, title: str | None = None,
+                          body: str | None = None) -> dict:
+        """Update a task's status (todo|doing|done), result note, title, or body."""
+        return tools.update_task(task_id, status, result, title, body)
 
     @mcp.tool()
     def codex_complete_task(task_id: int, result: str = "") -> dict:
@@ -92,25 +195,16 @@ def build_app(token: str, books_root: str, api_url: str, engine_dir: str | None 
 
     @mcp.tool()
     def codex_sync(dry_run: bool = True) -> str:
-        """Run one folder<->DB reconcile cycle. dry_run=True reports without writing."""
-        return tools.sync(dry_run=dry_run, token=token, api_url=api_url)
+        """Run one folder<->DB reconcile cycle (admin: service token only).
+        dry_run=True reports without writing. Retires with the DB-canonical flip."""
+        caller = CURRENT_TOKEN.get()
+        if not gate.is_service(caller):
+            return ("refused: codex_sync reconciles the whole books folder and needs "
+                    "the service token; personal tokens use the granular tools instead.")
+        return tools.sync(dry_run=dry_run, token=caller, api_url=api_url)
 
     app = mcp.streamable_http_app()
-
-    class BearerAuth(BaseHTTPMiddleware):
-        # Accept the token either as an Authorization: Bearer header (smoke test /
-        # SDK clients) OR as a ?k=<token> query param. The query form is needed
-        # because Claude's "Add custom connector" UI takes only a URL (no header
-        # field) and OAuth isn't implemented yet, so the secret rides in the URL.
-        async def dispatch(self, request, call_next):
-            auth = request.headers.get("authorization", "")
-            supplied = auth[7:] if auth.startswith("Bearer ") else request.query_params.get("k", "")
-            if supplied != token:
-                return JSONResponse({"error": "unauthorized"}, status_code=401)
-            return await call_next(request)
-
-    app.add_middleware(BearerAuth)
-    return app
+    return TokenAuthMiddleware(app, gate, public_url)
 
 
 def main() -> int:
@@ -119,7 +213,8 @@ def main() -> int:
         print("ERROR: API_KEY not set."); return 2
     books_root = os.environ.get("CODEX_BOOKS_DIR", "/srv/codex/books")
     api_url = os.environ.get("CODEX_API_URL", "http://127.0.0.1:8081/api.php")
-    app = build_app(token, books_root, api_url)
+    public_url = os.environ.get("CODEX_PUBLIC_URL", "")
+    app = build_app(token, books_root, api_url, public_url=public_url)
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8765)
     return 0

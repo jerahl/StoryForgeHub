@@ -17,6 +17,7 @@ _MANUSCRIPT_RE = re.compile(r"^Manuscript/.+\.md$", re.IGNORECASE)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import codex_sync_lib as csl
+from api_client import ApiError
 
 
 class CodexTools:
@@ -45,25 +46,29 @@ class CodexTools:
                     yield bid, e
 
     def search(self, query: str, book: Optional[str] = None, limit: int = 25) -> List[dict]:
-        q = (query or "").lower().strip()
-        hits = []
-        for bid, e in self._all_entries():
-            if book and bid != book:
-                continue
-            hay = " ".join([e.get("name", ""), e.get("slug", ""),
-                            " ".join(f.get("value", "") for f in e.get("fields", [])),
-                            " ".join(s.get("body", "") for s in e.get("sections", []))]).lower()
-            if q in hay:
-                hits.append({"book": bid, "db": e["db"], "slug": e["slug"], "name": e.get("name", "")})
-                if len(hits) >= limit:
-                    break
-        return hits
+        """Server-side search (api.php `search`): entries, chapters, and notes,
+        each hit with a snippet — no whole-snapshot export on this path anymore."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        return self.api.search(q, book, max(1, int(limit)))
 
     def get_entry(self, book: str, db: str, slug: str) -> Optional[str]:
         for bid, e in self._all_entries():
             if bid == book and e["db"] == db and e["slug"] == slug:
                 return csl.render_entry(e)
         return None
+
+    def list_entries(self, book: str, db: Optional[str] = None) -> List[dict]:
+        return self.api.list_entries(book, db)
+
+    def get_chapter(self, book: str, chapter_id=None, file: Optional[str] = None) -> dict:
+        if chapter_id is None and not file:
+            raise ValueError("pass chapter_id or file")
+        return self.api.get_chapter(book, chapter_id, file)
+
+    def get_diagnostics(self, book: str, chapter_id) -> dict:
+        return self.api.get_diagnostics(book, chapter_id)
 
     def list_chapters(self, book: Optional[str] = None) -> List[dict]:
         out = []
@@ -83,6 +88,34 @@ class CodexTools:
 
     def complete_task(self, task_id: int, result: str = "") -> dict:
         return self.api.apply({"task_results": [{"id": task_id, "status": "done", "result": result}]})
+
+    def create_task(self, book: str, title: str, body: str = "",
+                    for_claude: bool = False, priority: str = "med") -> dict:
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("title is required")
+        if priority not in ("low", "med", "high"):
+            raise ValueError("priority must be low|med|high")
+        return self.api.create_task({"book": book, "title": title, "body": body,
+                                     "for_claude": bool(for_claude), "priority": priority})
+
+    def update_task(self, task_id: int, status: Optional[str] = None,
+                    result: Optional[str] = None, title: Optional[str] = None,
+                    body: Optional[str] = None) -> dict:
+        patch = {"id": int(task_id)}
+        if status is not None:
+            if status not in ("todo", "doing", "done"):
+                raise ValueError("status must be todo|doing|done")
+            patch["status"] = status
+        if result is not None:
+            patch["result"] = result
+        if title is not None:
+            patch["title"] = title
+        if body is not None:
+            patch["body"] = body
+        if len(patch) == 1:
+            raise ValueError("nothing to update")
+        return self.api.update_task(patch)
 
     def apply_results(self, payload: dict) -> dict:
         return self.api.apply(payload)
@@ -144,16 +177,38 @@ class CodexTools:
         return self.push_files(book, {relpath: md})
 
     def save_chapter(self, book: str, filename: str, md: str,
-                     reconcile: bool = False) -> dict:
-        """Create/update a manuscript chapter from Markdown. `filename` is a bare
-        file name (e.g. 'ch-05-the-wall.md'); '.md' is appended if missing. Adding
-        a chapter never archives the others unless reconcile=True."""
+                     base_hash: str = "") -> dict:
+        """Create/update a manuscript chapter through the base-hash-guarded
+        api.php save_chapter action (A3). `filename` is a bare file name
+        (e.g. 'ch-05-the-wall.md'); '.md' is appended if missing.
+
+        Creating a new chapter needs no base_hash. UPDATING an existing one
+        requires the body_hash from codex_get_chapter — a stale or missing
+        hash is refused, and the refusal carries the CURRENT hash + body so
+        the caller can merge and retry instead of clobbering."""
         fn = os.path.basename(str(filename).replace("\\", "/").strip())
         if not fn:
             raise ValueError("filename is required")
         if not fn.lower().endswith(".md"):
             fn += ".md"
-        return self.push_files(book, {f"Manuscript/{fn}": md}, reconcile_chapters=reconcile)
+        payload = {"book": book, "file": fn, "markdown": md}
+        if base_hash:
+            payload["base_hash"] = base_hash
+        try:
+            return self.api.save_chapter(payload)
+        except ApiError as e:
+            # Refusals are data, not crashes: hand back everything api.php said
+            # (conflict msg, current_hash, current_body) so Claude can resolve.
+            out = {"status": "refused"}
+            out.update({k: v for k, v in (e.payload or {}).items() if k != "ok"})
+            out.setdefault("error", str(e))
+            return out
+
+    def create_chapter(self, book: str, title: str, num: str = "") -> dict:
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("title is required")
+        return self.api.create_chapter({"book": book, "title": title, "num": num})
 
     # ---- sync (runs the reconcile cycle out-of-process) ----
     def sync(self, dry_run: bool = True, token: Optional[str] = None,

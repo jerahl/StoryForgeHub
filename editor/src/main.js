@@ -1,41 +1,40 @@
 /*
- * Codex entry editor (MASTER-PLAN Phase 4).
- * TipTap/ProseMirror WYSIWYG for the PROSE SECTIONS of an entry, plus a small
- * structured metadata form (rendered by PHP) above it. On submit we assemble the
- * exact Codex markdown dialect and post it to the existing entry_save action, so
- * the server still parses it with md_parse_entry — the save contract is unchanged.
+ * Codex editor bundle (MASTER-PLAN P4/P5 + standalone plan Track C).
+ * Three surfaces share one hardened markdown layer (codex-md.js):
  *
- * Markdown round-trip: tiptap-markdown handles the section prose (## headings,
- * bold, lists, etc.). [[wiki-links]] are plain text and survive untouched (P5 adds
- * the live mention node). Metadata never enters TipTap — it's form fields.
+ *   ENTRY  (#codex-prose)  — the P4 entry editor: metadata form + prose
+ *          sections in TipTap; submit assembles the Codex markdown.
+ *   CHAPTER (#chapter-wys + #chapter-md) — Track C2: the textarea stays the
+ *          buffer of record (autosave, style check, rail, word count all read
+ *          it); TipTap mounts as a rich view that WRITES THROUGH on every
+ *          update and fires 'input' so the Phase 15 tooling never notices.
+ *          A Rich/Markdown toggle flips views over the same buffer, and the
+ *          round-trip seatbelt (stable / tidy / lossy) decides whether rich
+ *          mode is allowed at all.
+ *   GENERIC (.wys[data-for]) — Track C3: any markdown textarea (meta pages,
+ *          notes) gets the same rich view + toggle.
+ *
+ * Every serialization goes through serializeCodex(); the corpus test in
+ * editor/test is the gate for the layer's fidelity.
  */
 import { Editor, Extension } from '@tiptap/core'
-import StarterKit from '@tiptap/starter-kit'
-import { Markdown } from 'tiptap-markdown'
 import { Plugin, PluginKey } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
+import { buildCodexExtensions, serializeCodex, roundTripCheck } from './codex-md.js'
 import './editor.css'
 
 function esc(v) { return (v == null ? '' : String(v)) }
-
 function reEscape(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
 
 /*
- * Live mention highlighting (MASTER-PLAN Phase 5, editor half).
- * Decorates recognized entry names/aliases in the prose as you type, mirroring
- * the server-side inline auto-linker: longest-match-first, word-boundary, and
- * one highlight per byte-span (a longer name wins over a shorter one inside it).
- * Text already inside an existing [[wiki-link]] is plain text in ProseMirror, so
- * a name sitting inside [[ ]] still highlights, but clicking it would re-wrap —
- * so we skip any match whose immediate neighbours are the wiki-link brackets.
- *
- * Click a highlight to "link it": the matched text is replaced with [[slug]],
- * which round-trips through tiptap-markdown and is stored as a manual link.
+ * Live mention highlighting (P5): decorate recognized entry names/aliases in
+ * prose text — longest-match-first, word-boundary, one highlight per span.
+ * Click a highlight to link it: the text becomes a [[wiki-link]] NODE (Track
+ * C1 — no more raw-bracket insertion).
  */
 const mentionKey = new PluginKey('codexMentions')
 
 function buildMentionExtension(targets) {
-  // Pre-compile one case-insensitive, word-bounded regex per phrase.
   const compiled = targets.map((t) => ({
     slug: t.slug,
     re: new RegExp('(?<!\\w)' + reEscape(t.phrase) + '(?!\\w)', 'giu'),
@@ -55,10 +54,6 @@ function buildMentionExtension(targets) {
               const used = new Array(text.length).fill(false)
               const overlaps = (s, e) => { for (let k = s; k < e; k++) if (used[k]) return true; return false }
               const mark = (s, e) => { for (let k = s; k < e; k++) used[k] = true }
-              // pre-mark explicit [[wiki-links]] so nothing inside them highlights
-              const wl = /\[\[[^\]]*\]\]/g
-              let w
-              while ((w = wl.exec(text)) !== null) mark(w.index, w.index + w[0].length)
               for (const c of compiled) {
                 c.re.lastIndex = 0
                 let m
@@ -85,7 +80,8 @@ function buildMentionExtension(targets) {
             const to = from + (el.textContent || '').length
             if (to <= from) return false
             event.preventDefault()
-            view.dispatch(view.state.tr.insertText('[[' + slug + ']]', from, to))
+            const wl = view.state.schema.nodes.codexWikilink
+            view.dispatch(view.state.tr.replaceWith(from, to, wl.create({ target: slug })))
             return true
           },
         },
@@ -96,12 +92,29 @@ function buildMentionExtension(targets) {
 
 function readMentionTargets() {
   const el = document.getElementById('codex-mention-targets')
-  if (!el) return []
-  try {
-    const arr = JSON.parse(el.textContent || '[]')
-    return Array.isArray(arr) ? arr.filter((t) => t && t.phrase && t.slug) : []
-  } catch (_e) { return [] }
+  if (el) {
+    try {
+      const arr = JSON.parse(el.textContent || '[]')
+      if (Array.isArray(arr)) return arr.filter((t) => t && t.phrase && t.slug)
+    } catch (_e) { /* fall through */ }
+  }
+  const S = window.__scene
+  if (S && Array.isArray(S.targets)) return S.targets.filter((t) => t && t.phrase && t.slug)
+  return []
 }
+
+function makeEditor(mount, { mentions = true } = {}) {
+  const extra = []
+  const targets = mentions ? readMentionTargets() : []
+  if (targets.length) extra.push(buildMentionExtension(targets))
+  return new Editor({
+    element: mount,
+    extensions: buildCodexExtensions(extra),
+    content: '',
+  })
+}
+
+/* ------------------------------------------------------------ entry editor */
 
 function addFieldRow(wrap, key = '', val = '') {
   const row = document.createElement('div')
@@ -128,41 +141,179 @@ function assembleMarkdown(editor) {
   if (rel) out.push('- **Related:** ' + rel)
 
   let md = out.join('\n')
-  // tiptap-markdown backslash-escapes brackets; restore [[wiki-links]] in prose
-  const body = (editor.storage.markdown.getMarkdown() || '').trim().replace(/\\([\[\]])/g, '$1')
+  const body = serializeCodex(editor).trim()
   if (body) md += '\n\n' + body
   return md + '\n'
 }
 
-function boot() {
+function bootEntry() {
   const mount = document.getElementById('codex-prose')
-  if (!mount) return
+  if (!mount) return false
   const form = document.getElementById('entry-form')
   const seed = document.getElementById('codex-initial-md')
   const initial = seed ? seed.textContent : (mount.getAttribute('data-md') || '')
 
-  const extensions = [StarterKit, Markdown.configure({ html: false, linkify: false, breaks: false })]
-  const targets = readMentionTargets()
-  if (targets.length) extensions.push(buildMentionExtension(targets))
+  const editor = makeEditor(mount)
+  editor.commands.setContent(initial)
 
-  const editor = new Editor({
-    element: mount,
-    extensions,
-    content: initial,
-  })
-
-  // dynamic metadata field rows
   const fieldsWrap = document.getElementById('meta-fields')
   document.getElementById('add-field')?.addEventListener('click', () => addFieldRow(fieldsWrap))
   fieldsWrap?.addEventListener('click', (e) => {
     if (e.target.closest('.rm-field')) e.target.closest('.field-row').remove()
   })
 
-  // assemble markdown into the hidden field right before the normal POST
   form?.addEventListener('submit', () => {
     const out = document.getElementById('md-out')
     if (out) out.value = assembleMarkdown(editor)
   })
+  return true
+}
+
+/* ----------------------------------------------- write-through rich view
+ * The shared Track C2/C3 machinery: a textarea is the buffer of record; the
+ * TipTap view writes through to it (firing 'input' so autosave/rail/counters
+ * keep working) and a toggle flips between the two views of the same buffer. */
+
+function bootWriteThrough({ ta, mount, toggle, notice, modeKey, mentions }) {
+  const editor = makeEditor(mount, { mentions })
+  const check = roundTripCheck(editor, ta.value)
+
+  let mode = 'raw'
+  let syncing = false
+
+  function writeThrough() {
+    if (mode !== 'rich') return
+    syncing = true
+    ta.value = serializeCodex(editor)
+    ta.dispatchEvent(new Event('input', { bubbles: true }))
+    syncing = false
+  }
+  editor.on('update', writeThrough)
+
+  function setMode(next, remember = true) {
+    if (next === 'rich' && check.verdict === 'lossy') next = 'raw'
+    mode = next
+    if (mode === 'rich') {
+      // re-parse the buffer (it may have changed in raw mode)
+      editor.commands.setContent(ta.value)
+      mount.hidden = false
+      ta.style.display = 'none'
+      toggle.textContent = 'Markdown'
+      toggle.title = 'Switch to raw Markdown'
+      if (notice) notice.hidden = check.verdict !== 'tidy'
+    } else {
+      mount.hidden = true
+      ta.style.display = ''
+      toggle.textContent = 'Rich text'
+      toggle.title = check.verdict === 'lossy'
+        ? 'Rich text is unavailable: this document contains formatting the rich editor cannot round-trip safely.'
+        : 'Switch to the rich editor'
+      if (notice) notice.hidden = true
+    }
+    document.body.classList.toggle('wys-rich', mode === 'rich')
+    if (remember) { try { localStorage.setItem(modeKey, mode) } catch (_e) {} }
+  }
+
+  toggle.addEventListener('click', () => {
+    if (mode === 'raw' && check.verdict === 'lossy') return
+    setMode(mode === 'raw' ? 'rich' : 'raw')
+  })
+  if (check.verdict === 'lossy') {
+    toggle.disabled = true
+    toggle.title = 'Rich text is unavailable: this document contains formatting the rich editor cannot round-trip safely.'
+  }
+
+  // External writers (draft restore, find/replace-all) set ta.value and fire
+  // 'input'; in rich mode, mirror those changes back into the editor.
+  ta.addEventListener('input', () => {
+    if (mode === 'rich' && !syncing) editor.commands.setContent(ta.value)
+  })
+
+  // Default: rich when safe, unless the writer chose raw last time.
+  let pref = null
+  try { pref = localStorage.getItem(modeKey) } catch (_e) {}
+  setMode(pref === 'raw' ? 'raw' : (check.verdict === 'lossy' ? 'raw' : 'rich'), false)
+
+  return { editor, getMode: () => mode, setMode, check }
+}
+
+/* ------------------------------------------------------------ chapter editor */
+
+function bootChapter() {
+  const ta = document.getElementById('chapter-md')
+  const mount = document.getElementById('chapter-wys')
+  const toggle = document.getElementById('wysToggle')
+  if (!ta || !mount || !toggle) return false
+
+  const rig = bootWriteThrough({
+    ta, mount, toggle,
+    notice: document.getElementById('wysNotice'),
+    modeKey: 'codexChapterMode',
+    mentions: true,
+  })
+
+  // The md-toolbar drives BOTH modes: in rich mode the buttons run editor
+  // commands; in raw mode the existing textarea handler (Phase 15 JS) wins.
+  const bar = document.getElementById('mdToolbar')
+  if (bar) {
+    bar.addEventListener('click', (e) => {
+      if (rig.getMode() !== 'rich') return
+      const btn = e.target.closest('button[data-md]')
+      if (!btn) return
+      e.preventDefault(); e.stopImmediatePropagation()
+      const ch = rig.editor.chain().focus()
+      switch (btn.getAttribute('data-md')) {
+        case 'bold': ch.toggleBold().run(); break
+        case 'italic': ch.toggleItalic().run(); break
+        case 'strike': ch.toggleStrike().run(); break
+        case 'code': ch.toggleCode().run(); break
+        case 'h2': ch.toggleHeading({ level: 2 }).run(); break
+        case 'quote': ch.toggleBlockquote().run(); break
+        case 'ul': ch.toggleBulletList().run(); break
+        case 'ol': ch.toggleOrderedList().run(); break
+        case 'break': ch.setHorizontalRule().run(); break
+        default: break   // underline/link have no rich mapping — raw mode only
+      }
+    }, true)   // capture: beat the textarea handler
+  }
+
+  // Find & Style operate on the textarea — drop to raw when opened in rich mode.
+  for (const id of ['btnFind', 'btnStyle']) {
+    document.getElementById(id)?.addEventListener('click', () => {
+      if (rig.getMode() === 'rich') rig.setMode('raw')
+    }, true)
+  }
+
+  // Belt & braces: re-serialize right before the form posts.
+  document.getElementById('entry-form')?.addEventListener('submit', () => {
+    if (rig.getMode() === 'rich') ta.value = serializeCodex(rig.editor)
+  })
+  return true
+}
+
+/* ---------------------------------------------------- generic markdown areas */
+
+function bootGeneric() {
+  let bootedAny = false
+  document.querySelectorAll('div.wys[data-for]').forEach((mount) => {
+    const ta = document.getElementById(mount.getAttribute('data-for'))
+    const toggle = document.getElementById(mount.getAttribute('data-toggle') || '')
+    if (!ta || !toggle) return
+    bootWriteThrough({
+      ta, mount, toggle,
+      notice: null,
+      modeKey: 'codexMdMode:' + (mount.getAttribute('data-for') || 'md'),
+      mentions: mount.hasAttribute('data-mentions'),
+    })
+    bootedAny = true
+  })
+  return bootedAny
+}
+
+function boot() {
+  bootEntry()
+  bootChapter()
+  bootGeneric()
 }
 
 if (document.readyState !== 'loading') boot()

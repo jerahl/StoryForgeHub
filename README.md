@@ -5,25 +5,30 @@ template): the library of three books, each with Characters, Locations, Factions
 Objects, Lore, plus Manuscript, Progressions, Open threads, Meta — and two extras the
 template didn't have: **Tasks** (which you can flag for Claude) and a **Writing log**.
 
-Everything runs on one **Debian VPS** (see `MASTER-PLAN-vps-2026-06-28.md`): the PHP app,
-the database, and the canonical book folders at `/srv/codex/books`. Sync is a **local
-folder↔DB reconcile** on the box, run on a schedule and exposed to Claude as a remote MCP
-service (`codex-mcp`, in build — Master Plan Phases 2–3). The `codex-webapp-sync` skill is
-what Claude uses when you say *"check the web app for tasks and run them"* or *"fill in the
+Everything runs on one **Debian VPS** (see `MASTER-PLAN-vps-2026-06-28.md` and its
+successor `MASTER-PLAN-standalone-2026-07-06.md`): the PHP app and the database. Since
+the **DB-canonical flip (Track A)** the database is the single source of truth — there
+is no books-folder sync to run. Markdown remains the dialect everywhere: every save
+records an attributed revision, `bin/export.php` regenerates clean book folders on
+demand (the nightly backup keeps one), and import (zip / snapshot / api push) loads
+them back. Claude connects per-user over the remote MCP (`codex-mcp`) using the
+`storyforge` skill for *"check my Codex for tasks and run them"* or *"fill in the
 writing log."*
 
 ```
-        ┌─────────────── Debian VPS ───────────────┐
-        │  web app (PHP) ── PDO ──► MariaDB         │
-        │        ▲                                  │
-        │        │ local reconcile (systemd timer)  │
-        │        ▼                                  │
-        │  /srv/codex/books  ◄──► codex-mcp service │── HTTPS ──► Claude (remote MCP)
-        └───────────────────────────────────────────┘
+        ┌─────────────── Debian VPS ────────────────────┐
+        │  web app (PHP) ── PDO ──► MariaDB (the truth) │
+        │        ▲                    │  ▲               │
+        │        │                    │  └ revisions     │
+        │  codex-mcp service ── api.php (one writer)    │── HTTPS ──► each user's Claude
+        │        nightly: mysqldump + Markdown export    │            (OAuth / token)
+        └────────────────────────────────────────────────┘
 ```
 
-> The earlier PC↔host sync (`sync-codex.ps1` + a bridge folder) has been retired with the
-> move to the single-box VPS.
+> Retired along the way: the PC↔host sync (`sync-codex.ps1` + bridge folder) with the
+> VPS move, and the folder↔DB reconcile with the DB-canonical flip. During the cutover
+> window a transitional **mirror mode** (set `CODEX_BOOKS_DIR`) still projects saves
+> onto the old folders — see the A4 runbook in the standalone master plan.
 
 ---
 
@@ -77,33 +82,44 @@ plan is in **`MASTER-PLAN-vps-2026-06-28.md`** (Phase 0 = this section).
 Open the site. You should see all three books with their entries, chapters, words, and
 threads. (`seed.json` was generated from your live Codex on 2026-06-20.)
 
-## Part C — Sync (on the VPS)
+## Part C — Backups & export (sync is retired)
 
-With the app, database, and book folders all on the VPS, sync becomes a **local
-folder↔DB reconcile on the box**, not a PC-to-host job. The target is a small
-**`codex-mcp` service** (Python, reusing `codex_sync_lib.py`) run as a `systemd` unit,
-driven on a **`systemd` timer** for continuous sync and exposed to Claude as a **remote
-MCP** over HTTPS — replacing the Windows scheduled task and the bridge folder entirely.
-See `MASTER-PLAN-vps-2026-06-28.md` Phases 2–3 for the build, and
-`MCP-SYNC-PLAN-2026-06-27.md` for the tool surface.
+The DB is canonical (Track A), so there is nothing to sync. What replaces it:
 
-The old Windows `sync-codex.ps1` scheduled task and its bridge folder are retired — they
-belonged to the PC↔host model and don't fit the single-box VPS. The reconcile guarantees
-(never auto-delete, skip conflicts, commit only on confirmed write) carry over into the
-`codex-mcp` service unchanged.
+- **Revisions:** every chapter and entry save — web, MCP, or import — records an
+  attributed revision (who, and through which door). Chapters get a history panel in
+  the editor; entries get a **History** panel with one-click restore (a restore is a
+  new save on top, never a rewind).
+- **Nightly export:** `bin/export.php --dir <target>` renders every book back to
+  canonical Markdown folders (entries, chapters, notes, meta, progressions, sources,
+  `book.json`) — the layout imports cleanly again. `deploy/backup.sh` tars one next to
+  the `mysqldump` every night; copy both off-box.
+- **Transitional mirror mode:** while `CODEX_BOOKS_DIR` is still set, saves are also
+  projected onto the old book folders (best-effort, after the DB commit) so the folder
+  stays warm through the cutover window. The A4 runbook in
+  `MASTER-PLAN-standalone-2026-07-06.md` walks the final switch-off.
+
+The old guarantees survive the flip: nothing is auto-deleted (archives + revisions),
+and concurrent edits are refused with context rather than merged or clobbered — in the
+app *and* over MCP (`codex_save_chapter` requires the `body_hash` you read).
 
 ## Part D — Install the Claude skill (once)
 
-Install `codex-webapp-sync.skill` via **Settings → Capabilities**, *or* it auto-loads
-because a copy lives at `projects/books/.claude/skills/codex-webapp-sync/`.
+Install `storyforge.skill` via **Settings → Capabilities** (source in
+`skill-storyforge/`). It teaches Claude the tool surface and the house rules —
+per-user identity, read-before-write chapter saves, never inventing canon. The old
+`codex-webapp-sync.skill` is superseded (its SKILL.md says so) but still in the repo
+for reference.
 
 ---
 
 ## Daily use
 
-- **Browse / edit** anything in the web app. Entries are edited as Codex markdown (the
-  app shows a clean view and an Edit screen); saving re-parses and the next sync writes
-  it back to the right folder verbatim.
+- **Browse / edit** anything in the web app — including chapters, in a true rich-text
+  editor (Track C): wiki-links render as chips, author notes (`<!-- … -->`) as visible
+  pills, scene breaks as ornaments, and a toggle flips to raw Markdown any time. The
+  round-trip seatbelt guarantees rich mode can never mangle the dialect; every save is
+  a restorable revision.
 - **Flag work for Claude:** web app → **Tasks** → write a task, tick *Flag for Claude*.
   Then tell Claude: **"check the web app for tasks and run them."** Claude runs each task
   against the Codex, and the next sync marks it done and uploads the changes.
@@ -150,3 +166,14 @@ because a copy lives at `projects/books/.claude/skills/codex-webapp-sync/`.
   import and cross-book access are refused). Only a hash of each token is stored, they're shown
   once, and they're revocable. Per-user spell-check dictionary words no longer leak between
   co-authors, and chapter notes record their author.
+- **Per-user MCP connectors** (standalone plan, Tracks B1–B4): each writer connects
+  their own Claude to `https://<domain>/mcp` — just paste the URL and **sign in with
+  your account** when Claude asks (OAuth 2.1 with consent, revocable under
+  **Account → Connected apps**), or use the `?k=<personal token>` fallback from
+  **Account → API tokens**. Every tool call acts as that user: their books, their
+  role, their name in the activity log. The tool surface includes granular reads
+  (`codex_get_chapter` with the full body, server-side `codex_search` with snippets,
+  `codex_get_diagnostics`) and task create/update, so "check my Codex for tasks and
+  run them" works per-user with no folder sync involved. In-app guide: **Working
+  with Claude** (`?p=claude`); Claude-side skill: `storyforge.skill`; details:
+  `sync_engine/MCP-SERVER.md`.

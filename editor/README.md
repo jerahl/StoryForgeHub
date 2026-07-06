@@ -1,16 +1,18 @@
-# editor — Codex entry editor (MASTER-PLAN Phase 4)
+# editor — the Codex WYSIWYG (MASTER-PLAN P4/P5 + standalone plan Track C)
 
-TipTap/ProseMirror WYSIWYG for the **prose sections** of a Codex entry, with a
-structured **metadata form** above it. Bundled with Vite into a single static
-asset the PHP app loads from the docroot.
+TipTap/ProseMirror rich editing for every prose surface in the app — entries,
+**chapters** (the C2 payoff), meta pages, and notes — over one hardened
+markdown layer. Bundled with Vite into a single static asset the PHP app loads
+from the docroot.
 
 ## What ships vs. what's source
 - **Shipped (deployed):** `htdocs/assets/app/editor.js` + `editor.css` — the built
   bundle. It's under the docroot, so a normal `htdocs` deploy includes it. **Node
   is NOT needed on the server.**
 - **Source (this folder, NOT deployed):** `package.json`, `vite.config.js`,
-  `src/main.js`, `src/editor.css`. `03-setup-app.sh` excludes `editor/` and
-  `node_modules/` from the server deploy.
+  `src/main.js`, `src/codex-md.js`, `src/editor.css`, and the test suites in
+  `test/`. `03-setup-app.sh` excludes `editor/` and `node_modules/` from the
+  server deploy.
 
 ## Rebuild (only when you change the editor source)
 Needs Node 18+. From this folder:
@@ -18,42 +20,75 @@ Needs Node 18+. From this folder:
 npm install
 npm run build      # -> ../htdocs/assets/app/editor.js (+ editor.css)
 ```
-Then deploy `htdocs/` as usual (03-setup-app.sh or copy the two asset files).
+Then deploy `htdocs/` as usual.
 
-## How it works (save contract is unchanged)
-- The strict metadata (Name/Slug/Status/Type/extra fields/Related) is a plain HTML
-  form rendered by PHP — it never enters TipTap.
-- TipTap edits only the `## Section` prose (seeded from a `<script type="text/plain"
-  id="codex-initial-md">` tag).
-- On submit, `main.js` assembles the exact Codex markdown (`# Name`, `- **Key:**
-  value` metadata bullets, then the section markdown from tiptap-markdown) into the
-  hidden `#md-out` textarea and lets the normal `entry_save` POST run — so the
-  server still parses with `md_parse_entry`. **No new save path.**
-- `#md-out` is **prefilled with the current full markdown**, so if the bundle fails
-  to load (no JS), submitting is a safe no-op rather than a wipe.
+## The hardened markdown layer (Track C1 — `src/codex-md.js`)
+Stock tiptap-markdown was lossy in exactly the ways the dialect can't afford:
+it destroyed `<!-- comments -->`, escaped `[[brackets]]`, and rewrote `***` as
+`---`. The layer fixes each at the schema level:
 
-## Gotcha fixed: bracket escaping
-tiptap-markdown backslash-escapes `[` / `]`, which would corrupt `[[wiki-links]]`
-in prose on save. `main.js` un-escapes brackets after serialization
-(`.replace(/\\([\[\]])/g, '$1')`). Verified round-trip in a headless DOM keeps
-`[[slug]]` intact.
+- **WikiLink** — `[[slug]]` / `[[slug|Label]]` as an atomic inline chip;
+  serializes verbatim.
+- **CodexComment** (inline + block) — `<!-- author notes -->` render as visible
+  pills (writers SEE their notes) and serialize byte-identically, including
+  multi-line block comments.
+- **SceneBreak** — remembers the exact source marker (`***`, `---`, `___`,
+  even `* * *`) and writes the same bytes back.
+- **Link** — real `[text](url)` support so URLs are never silently dropped.
+- `serializeCodex()` — THE serializer for every save path: `getMarkdown()` plus
+  a conservative unescape (`\[ \] \_ \~`, isolated only, so `snake_case` and
+  `[sic]` stay byte-stable while `\_\_dunder\_\_` can never mint `__bold__`).
 
-## Live mentions (MASTER-PLAN Phase 5)
-PHP emits the book's recognized names/aliases as JSON in a
-`<script type="application/json" id="codex-mention-targets">` tag (the current
-entry's own slug is excluded so it can't self-link). `main.js` builds a ProseMirror
-decoration plugin that **highlights** those names as you type — longest-match-first,
-word-boundary, case-insensitive, one highlight per span, and skips anything already
-inside `[[...]]`. **Click a highlight** to link it: the matched text is replaced with
-`[[slug]]`, which round-trips like any other wiki-link.
-- Same matching rules as the server-side inline auto-linker (`layout.php`), so the
-  editor preview and the rendered page agree.
-- The scan logic (longest-wins, overlap guard, wiki-link skip) is unit-tested in Node;
-  the ProseMirror placement + click-to-link is **browser-only — verify by hand.**
+## The round-trip gate (`npm test`)
+`test/roundtrip.test.mjs` is Track C's equivalent of the reconcile fixture
+suite — it runs the real TipTap editor in jsdom over three corpora:
 
-## Status / next
-- Wired into the **entry_edit** page. `entry_new` and meta-page editing still use the
-  raw textarea — convert them next.
-- Not browser-tested by the author of this commit (built + round-trip-verified in
-  Node/jsdom only). Verify in the browser: edit an entry with `[[links]]` and a few
-  sections, save, confirm links + headings survived and the diff is clean.
+- `test/corpus/` — must round-trip **canonically byte-stable** (typical
+  chapters, comments, scene breaks, entries, lists, links, citations).
+- `test/corpus-tidy/` — **real chapters/entries from `sync/seed.json`**; the
+  serializer may only tidy blank-line structure (equal line signatures) and
+  must reach a fixed point.
+- `test/corpus-normalizing/` — edge cases allowed to normalize once, then must
+  be a fixed point.
+
+**A construct that can't pass gets a node or stays raw-only — never ship a
+surface that fails here.**
+
+## The runtime seatbelt (three tiers)
+On load, each write-through surface serializes the document straight back and
+classifies it: **stable** (rich mode, silently), **tidy** (rich mode with a
+"save will tidy spacing" notice), **lossy** (raw Markdown only; the toggle is
+disabled and explains why). Rich mode can never destroy what it couldn't
+round-trip.
+
+## Surfaces (`src/main.js`)
+- **Entry** (`#codex-prose`) — the P4 editor: metadata form + prose sections;
+  submit assembles the Codex markdown into `#md-out` for the normal
+  `entry_save` POST. Live mentions (P5) highlight recognized names; clicking
+  one now inserts a WikiLink **node**.
+- **Chapter** (`#chapter-wys` + `#chapter-md`) — Track C2. The textarea stays
+  the buffer of record: the rich view **writes through** on every update and
+  fires `input`, so the Phase 15 tooling (autosave, style check, scene rail,
+  word count) never notices. The Rich/Markdown toggle flips two views over the
+  same buffer; Find/Style drop to raw (they operate on the textarea); the
+  md-toolbar drives whichever mode is active. Save is the same
+  conflict-guarded `chapter_save` POST.
+- **Generic** (`div.wys[data-for=<textarea id>]`) — Track C3: meta pages and
+  notes get the same write-through view + toggle; add `data-mentions` to light
+  up the mention highlighter (notes do).
+
+## Browser verification (`test/run-browser.sh`)
+Headless-Chromium smoke via Playwright against the real PHP app (seeded
+sqlite): rich mount, write-through typing, toolbar bold, toggle round-trip,
+conflict-guarded save, dialect constructs surviving a rich save byte-exactly,
+entry + note surfaces, zero page errors. This closes the standing
+"not browser-tested" gap — run it after any editor change:
+```bash
+bash test/run-browser.sh
+```
+(The browser binary comes from `PLAYWRIGHT_BROWSERS_PATH`; nothing downloads.)
+
+## Status / next (Track C4 candidates)
+Slash-command insert menu, paste-from-Word cleanup, smart-quote input rules
+honoring the P7 em-dash diagnostics, images (needs an upload endpoint), and
+the focused Write mode chrome (typewriter scroll, session word delta).

@@ -9,6 +9,10 @@
 	handle @denied {
 		respond 404
 	}
+	# OAuth discovery (Track B3): the well-known documents live at the origin
+	# root per RFC 8414/9728; serve them from oauth.php.
+	rewrite /.well-known/oauth-authorization-server* /oauth.php?action=as_metadata
+	rewrite /.well-known/oauth-protected-resource* /oauth.php?action=resource_metadata
 	handle {
 		php_fastcgi unix//run/php/php${PHP_VERSION}-fpm-codex.sock
 		file_server

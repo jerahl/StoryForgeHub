@@ -44,6 +44,8 @@ function book_gate($a) {
         /* --- edit, target book from the explicit `book` field (mutators confine
               their writes to that book, so the field is authoritative here) --- */
         case 'entry_save': case 'entry_new': case 'entry_delete': case 'meta_save':
+        case 'entry_revision_restore':   // A1: restore = a new save, same capability
+        case 'note_save':                // C3: notes are editable in-app now
         case 'task_save': case 'log_add': case 'scene_label': case 'progression_when':
         case 'reindex_mentions': case 'chapter_save': case 'chapter_new': case 'chapter_import':
         case 'dictionary_add': case 'dictionary_remove': case 'dictionary_import_codex':
@@ -152,6 +154,18 @@ if ($method === 'POST') {
         flash('Saved “' . $e['name'] . '”.');
         redirect(['p'=>'entry','book'=>$book,'db'=>$db,'slug'=>$e['slug']]);
     }
+    if ($a === 'entry_revision_restore') {   // A1: restore = a new save on top, never a rewind
+        $db = $_POST['db']; $slug = $_POST['slug'];
+        $rev = get_entry_revision($book, (int)($_POST['id'] ?? 0));
+        if (!$rev || $rev['db_key'] !== $db || $rev['slug'] !== $slug) { flash('Revision not found.', 'err'); redirect(['p'=>'entry','book'=>$book,'db'=>$db,'slug'=>$slug]); }
+        $e = md_parse_entry($rev['body'], $db, $slug);
+        if (!$e['slug']) $e['slug'] = $slug;
+        save_entry($book, $db, $e);
+        rebuild_threads($book);
+        log_activity($book, 'entry_restore', $db.'/'.$e['name'].' ← '.substr((string)$rev['created_at'],0,16));
+        flash('Restored “'.$e['name'].'” from '.substr((string)$rev['created_at'],0,16).'.');
+        redirect(['p'=>'entry','book'=>$book,'db'=>$db,'slug'=>$e['slug']]);
+    }
     if ($a === 'entry_new') {
         $db = $_POST['db']; $name = trim($_POST['name']);
         $slug = $_POST['slug'] ?: strtolower(preg_replace('/[^a-z0-9]+/i','-', $name));
@@ -182,6 +196,12 @@ if ($method === 'POST') {
         save_meta_page($book, $_POST['slug'], $_POST['title'], $_POST['body']);
         flash('Meta page saved.');
         redirect(['p'=>'meta_page','book'=>$book,'slug'=>$_POST['slug']]);
+    }
+    if ($a === 'note_save') {   // Track C3: notes are DB-canonical now — editable in-app
+        save_note_page($book, $_POST['slug'], $_POST['title'], $_POST['body']);
+        log_activity($book, 'note_save', $_POST['slug']);
+        flash('Note saved.');
+        redirect(['p'=>'note_page','book'=>$book,'slug'=>$_POST['slug']]);
     }
     if ($a === 'task_save') {
         save_task(['id'=>$_POST['id']?:null,'book_id'=>$book,'title'=>$_POST['title'],'body'=>$_POST['body'],
@@ -542,6 +562,12 @@ if ($method === 'POST') {
         flash('Token revoked.');
         redirect(['p'=>'account']);
     }
+    if ($a === 'account_grant_revoke') {   // Track B3: disconnect an OAuth-connected app
+        require_once dirname(__DIR__) . '/src/oauth.php';
+        revoke_oauth_grant((int)($_POST['id'] ?? 0), current_user_id());
+        flash('App disconnected.');
+        redirect(['p'=>'account']);
+    }
 
     /* ---- admin: users & invites (Phase 17) ---- */
     if (strpos($a, 'admin_') === 0) {
@@ -592,7 +618,7 @@ if ($method === 'POST') {
 $p = $_GET['p'] ?? 'overview';
 $book_id = $_GET['book'] ?? null;
 $book = $book_id ? get_book($book_id) : null;
-$bookScoped = !in_array($p, ['library','sync','overview','account','admin_users'], true);
+$bookScoped = !in_array($p, ['library','sync','overview','account','admin_users','claude'], true);
 if (!$book && $bookScoped) { $bks = get_books(); $book = $bks[0] ?? null; $book_id = $book['id'] ?? null; }
 // A book-scoped page with no accessible book (e.g. a member requested a book they
 // can't see, or has none yet) — send them to the library rather than render an
@@ -605,7 +631,8 @@ $titles = ['overview'=>'Overview','library'=>'Library','book'=>$book['title']??'
            'threads'=>($book ? threads_label($book['profile'] ?? 'fiction')['title'] : 'Open threads'),
            'references'=>'References','exercises'=>'Exercises',
            'tasks'=>'Tasks','log'=>'Writing log','meta'=>'Meta','notes'=>'Notes','sync'=>'Sync','dictionary'=>'Dictionary',
-           'plot'=>'Plot board','vision'=>'Mood board','account'=>'Account','admin_users'=>'Users &amp; invites','members'=>'Members'];
+           'plot'=>'Plot board','vision'=>'Mood board','account'=>'Account','admin_users'=>'Users &amp; invites','members'=>'Members',
+           'claude'=>'Working with Claude'];
 layout_head($titles[$p] ?? 'Codex', $accent, $bodyType, $density, $mode);
 echo '<div class="app">';
 render_sidebar($book, $p, $_GET['db'] ?? null);
@@ -710,8 +737,8 @@ case 'library':
     }
     echo '</div>';
 
-    // ---- New book / Import book (Markdown-canonical; gated on CODEX_BOOKS_DIR) ----
-    if (books_dir_set()) {
+    // ---- New book / Import book (DB-canonical, A2 — always available) ----
+    {
         $profOpts = '';
         foreach (profile_ids() as $pid) $profOpts .= '<option value="'.e($pid).'">'.e(profile_label($pid)).'</option>';
         echo '<div class="toolbar" style="margin-top:22px">';
@@ -724,16 +751,14 @@ case 'library':
         echo '<div class="formrow"><div><label class="f">Profile</label><select name="profile">'.$profOpts.'</select></div>'
            . '<div><label class="f">Dot colour</label><input type="color" name="dot" value="#4A4391" style="width:64px;padding:2px;height:36px"></div></div>';
         echo '<div class="toolbar"><button class="btn primary">Create book</button></div>';
-        echo '<p class="muted" style="font-size:12px">Creates the folder skeleton on disk (Manuscript/ + Codex/) and the book row. Markdown stays canonical.</p></form></details>';
+        echo '<p class="muted" style="font-size:12px">Creates the book with its databases and an empty manuscript. Markdown stays the dialect everywhere.</p></form></details>';
         echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">Import book (.zip)</summary>';
         echo '<form method="post" enctype="multipart/form-data" style="margin-top:12px"><input type="hidden" name="action" value="book_import">';
         echo '<label class="f">Zipped book folder</label><input type="file" name="file" accept=".zip" required>';
         echo '<label class="f" style="margin-top:8px">Profile</label><select name="profile">'.$profOpts.'</select>';
         echo '<div class="toolbar"><button class="btn">Import .zip</button></div>';
-        echo '<p class="muted" style="font-size:12px">Upload a zip containing a book folder with <span class="mono">Codex/</span> and <span class="mono">Manuscript/</span>. It unzips under your books root (a fresh folder — never over an existing book) and reflects into the app.</p></form></details>';
+        echo '<p class="muted" style="font-size:12px">Upload a zip containing a book folder with <span class="mono">Codex/</span> and <span class="mono">Manuscript/</span>. It loads as a fresh book — never over an existing one.</p></form></details>';
         echo '</div>';
-    } else {
-        echo '<p class="muted" style="margin-top:22px">Set <span class="mono">CODEX_BOOKS_DIR</span> to enable creating and importing books in the app (Markdown stays the source of truth).</p>';
     }
     break;
 
@@ -947,6 +972,28 @@ case 'entry':
         }
         echo '</div></div>';
     }
+    // --- History (A1): every save through any door, restorable ---
+    $erevs = get_entry_revisions($book['id'], $db, $slug);
+    if ($erevs && user_can($book['id'], 'edit')) {
+        echo '<details class="entrybody" style="margin-top:14px"><summary style="cursor:pointer;font-weight:600">History <span class="muted mono">'.count($erevs).'</span></summary>';
+        echo '<p class="desc">Saved versions of this entry (newest first). Restoring makes a new save on top — nothing is rewound or lost.</p>';
+        foreach ($erevs as $i => $rv) {
+            $who = $rv['saved_by_name'] ?: ($rv['saved_via'] === 'api' ? 'Claude / API' : ($rv['saved_via'] === 'cli' ? 'CLI' : '—'));
+            $via = $rv['saved_via'] ? ' · '.e($rv['saved_via']) : '';
+            echo '<details style="margin:6px 0"><summary style="cursor:pointer" class="mono">'
+               . e(substr((string)$rv['created_at'],0,16)).' · '.e($who).$via.($rv['kind']!=='save'?' · '.e($rv['kind']):'').($i===0?' · current':'').'</summary>';
+            $full = get_entry_revision($book['id'], (int)$rv['id']);
+            echo '<div class="codeblock" style="margin:8px 0">'.e($full['body']).'</div>';
+            if ($i !== 0) {
+                echo '<form method="post" style="margin:0 0 8px" onsubmit="return confirm(\'Restore this version? The current version stays in history.\')">'
+                   . '<input type="hidden" name="action" value="entry_revision_restore"><input type="hidden" name="book" value="'.e($book['id']).'">'
+                   . '<input type="hidden" name="db" value="'.e($db).'"><input type="hidden" name="slug" value="'.e($slug).'">'
+                   . '<input type="hidden" name="id" value="'.(int)$rv['id'].'"><button class="btn sm">Restore this version</button></form>';
+            }
+            echo '</details>';
+        }
+        echo '</details>';
+    }
     break;
 
 case 'entry_md':
@@ -971,7 +1018,7 @@ case 'entry_edit':
     $relRaw = $e['relatedRaw'] ?? '';
     if ($relRaw === '' && !empty($e['related'])) $relRaw = implode(', ', array_map(function($r){return '[[' . $r . ']]';}, $e['related']));
 
-    echo '<div class="pagehead">'.db_chip($db).'<div><h1>Edit · '.e($e['name']).'</h1><p class="desc">Edit metadata in the fields; write prose in the editor. Saving assembles the Codex markdown and re-parses it; the next sync writes it back to your folder.</p></div></div>';
+    echo '<div class="pagehead">'.db_chip($db).'<div><h1>Edit · '.e($e['name']).'</h1><p class="desc">Edit metadata in the fields; write prose in the editor. Saving assembles the Codex markdown and re-parses it — every save is a restorable revision.</p></div></div>';
     echo '<form method="post" id="entry-form"><input type="hidden" name="action" value="entry_save"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="db" value="'.e($db).'"><input type="hidden" name="slug" value="'.e($slug).'">';
     // hidden field actually submitted; prefilled with current md so a no-JS submit is a safe no-op
     echo '<textarea id="md-out" name="md" style="display:none">'.e($md).'</textarea>';
@@ -1025,14 +1072,14 @@ case 'manuscript':
     $ch = get_chapters($book['id']);
     $arch = get_archived_chapters($book['id']);
     $view = (($_GET['view'] ?? '') === 'grid') ? 'grid' : 'list';
-    echo '<div class="pagehead"><div><h1>Manuscript</h1><p class="desc">'.count($ch).' chapters · '.number_format($book['wordCount']).' words. Click a chapter to read it; set its status below. Prose is authored in your folders and synced in.</p></div></div>';
+    echo '<div class="pagehead"><div><h1>Manuscript</h1><p class="desc">'.count($ch).' chapters · '.number_format($book['wordCount']).' words. Click a chapter to read it, or edit it right here — rich text or Markdown, your call.</p></div></div>';
     echo '<div class="toolbar"><a class="btn sm'.($view==='list'?' primary':'').'" href="'.url(['p'=>'manuscript','book'=>$book['id']]).'">List</a>'
        . '<a class="btn sm'.($view==='grid'?' primary':'').'" href="'.url(['p'=>'manuscript','book'=>$book['id'],'view'=>'grid']).'">Grid</a>'
        . '<form method="post" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="reindex_mentions"><input type="hidden" name="book" value="'.e($book['id']).'"><button class="btn sm" title="Rebuild the name/alias mention index for this book">Reindex mentions</button></form>'
        . '<a class="btn sm" style="margin-left:8px" href="'.url(['p'=>'dictionary','book'=>$book['id']]).'" title="Custom spell-check dictionary">Dictionary</a></div>';
 
-    // ---- New chapter / Import chapter(s) (Markdown-canonical; gated on CODEX_BOOKS_DIR) ----
-    if (books_dir_set()) {
+    // ---- New chapter / Import chapter(s) (DB-canonical, A2 — always available) ----
+    {
         $mb = bands_for($book['profile'] ?? 'fiction');   // "Chapter" copy; act/part-aware assign label
         $acts = get_acts($book['id']);
         $bh = '<input type="hidden" name="book" value="'.e($book['id']).'">';
@@ -1047,7 +1094,7 @@ case 'manuscript':
             echo '</select></div>';
         }
         echo '</div><div class="toolbar"><button class="btn primary">Create &amp; edit</button></div>';
-        echo '<p class="muted" style="font-size:12px">Seeds <span class="mono">Manuscript/ch-NN-title.md</span> with a heading, then opens the editor. Never overwrites an existing file.</p></form></details>';
+        echo '<p class="muted" style="font-size:12px">Creates <span class="mono">ch-NN-title.md</span> seeded with a heading, then opens the editor. Never overwrites an existing chapter.</p></form></details>';
         echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">Import chapter(s)</summary>';
         echo '<form method="post" enctype="multipart/form-data" style="margin-top:12px"><input type="hidden" name="action" value="chapter_import">'.$bh;
         echo '<label class="f">Upload .md file(s)</label><input type="file" name="files[]" accept=".md,.markdown,.txt" multiple>';
@@ -1058,7 +1105,7 @@ case 'manuscript':
         echo '</div>';
     }
 
-    if (!$ch && !$arch) { echo '<p class="empty">No chapters synced yet.'.(books_dir_set() ? ' Create one above.' : '').'</p>'; break; }
+    if (!$ch && !$arch) { echo '<p class="empty">No chapters yet. Create one above.</p>'; break; }
     if ($view === 'grid' && $ch) {
         // Act bands → chapter columns → scene cards (read-only). Acts have no CRUD
         // yet, so chapters with no act_id fall into a single "Chapters" band.
@@ -1508,8 +1555,7 @@ HTML;
 case 'chapter_edit':
     $c = get_chapter($_GET['id']);
     if (!$c || $c['book_id'] !== $book['id']) { echo '<p class="empty">Chapter not found.</p>'; break; }
-    if (!(cfg()['books_dir'] ?? '')) { echo '<p class="empty">Chapter editing is disabled on this server.</p>'; break; }
-    echo '<div class="pagehead"><div><h1>Edit · '.e($c['title']).'</h1><p class="desc">Edit the chapter prose (Markdown). Saving writes it back to <span class="mono">Manuscript/'.e($c['file']).'</span> and the database. A timestamped backup is kept in <span class="mono">Manuscript/_backups/</span>; if the file changed on disk since you opened it, the save is refused (no overwrite). Keystrokes autosave to a recoverable draft; spell check uses your browser plus this book’s <a href="'.url(['p'=>'dictionary','book'=>$book['id']]).'">custom dictionary</a>.</p></div></div>';
+    echo '<div class="pagehead"><div><h1>Edit · '.e($c['title']).'</h1><p class="desc">Write in rich text or raw Markdown — the same prose either way (toggle any time). Every save is a revision you can restore; if someone else saved first, your save is refused and your draft is kept. Keystrokes autosave to a recoverable draft; spell check uses your browser plus this book’s <a href="'.url(['p'=>'dictionary','book'=>$book['id']]).'">custom dictionary</a>.</p></div></div>';
 
     // Phase 21: take an advisory soft lock and surface anyone else in this chapter.
     touch_edit_lock($book['id'], (int)$c['id'], current_user_id());
@@ -1590,7 +1636,9 @@ CSS;
     echo '<button class="btn primary" type="submit">Save prose</button>';
     echo '<a class="btn" href="'.url(['p'=>'chapter','book'=>$book['id'],'id'=>$c['id']]).'">Cancel</a>';
     echo '<span class="ed-sep"></span>';
-    echo '<button type="button" class="btn sm" id="btnFind" title="Find &amp; replace (Ctrl/⌘-F)">Find</button>';
+    echo '<button type="button" class="btn sm" id="wysToggle" title="Switch editor mode">Rich text</button>';
+    echo '<span class="ed-sep"></span>';
+    echo '<button type="button" class="btn sm" id="btnFind" title="Find &amp; replace (Ctrl/⌘-F) — raw Markdown view">Find</button>';
     echo '<button type="button" class="btn sm" id="btnStyle" title="Local style check">Style</button>';
     if ($revs) echo '<button type="button" class="btn sm" id="btnRevs">History ('.count($revs).')</button>';
     echo '<span class="ed-status" id="edStatus">Saved</span>';
@@ -1623,8 +1671,13 @@ CSS;
        . '<button type="button" data-md="quote" title="Blockquote">&ldquo;</button>'
        . '<button type="button" data-md="ul" title="Bulleted list">&bull;</button>'
        . '<button type="button" data-md="ol" title="Numbered list" style="font-size:12px">1.</button>'
+       . '<button type="button" data-md="break" title="Scene break (***)">&#8258;</button>'
        . '<button type="button" data-md="link" title="Link">&#128279;</button>'
        . '</div>';
+    // Track C2: the rich view mounts here; the textarea below stays the buffer
+    // of record (autosave, style check, rail, word count all read/write it).
+    echo '<p class="wys-notice" id="wysNotice" hidden>Rich text will tidy blank-line spacing on save — the prose itself is untouched, and every save is a restorable revision.</p>';
+    echo '<div id="chapter-wys" hidden></div>';
     echo '<textarea id="chapter-md" name="md" spellcheck="true" style="width:100%;min-height:62vh;font-family:var(--mono);font-size:13px;line-height:1.5">'.e($c['body']).'</textarea>';
     // Local style-check results (hidden until toggled)
     echo '<div class="ed-style" id="edStyle" hidden><div class="ed-style-h">Style check <span class="muted" id="edStyleN"></span></div><div id="edStyleList"></div></div>';
@@ -1916,7 +1969,7 @@ JS;
     h2:function(){prefixLines('## ');}, quote:function(){prefixLines('> ');},
     ul:function(){prefixLines('- ');}, ol:function(){prefixLines('',true);}, link:link
   };
-  bar.addEventListener('mousedown', function(ev){ var b=ev.target.closest('button[data-md]'); if(!b)return; ev.preventDefault(); (actions[b.dataset.md]||function(){})(); });
+  bar.addEventListener('mousedown', function(ev){ if(document.body.classList.contains('wys-rich')) return; var b=ev.target.closest('button[data-md]'); if(!b)return; ev.preventDefault(); (actions[b.dataset.md]||function(){})(); });
   ta.addEventListener('keydown', function(e){
     if(!(e.ctrlKey||e.metaKey)||e.altKey) return;
     var k=e.key.toLowerCase();
@@ -1926,6 +1979,10 @@ JS;
   });
 })();</script>
 JS;
+    // Track C2: the rich editor bundle (mounts on #chapter-wys; the seatbelt
+    // decides whether rich mode is allowed, the toggle flips the views).
+    $ev = @filemtime(__DIR__ . '/assets/app/editor.js') ?: time();
+    echo '<link rel="stylesheet" href="assets/app/editor.css?v='.$ev.'"><script src="assets/app/editor.js?v='.$ev.'" defer></script>';
     break;
 
 case 'dictionary':
@@ -2342,8 +2399,13 @@ case 'meta_page':
     if ($edit) {
         echo '<form method="post"><input type="hidden" name="action" value="meta_save"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="slug" value="'.e($mp['slug']).'">';
         echo '<label class="f">Title</label><input type="text" name="title" value="'.e($mp['title']).'">';
-        echo '<label class="f">Body (markdown)</label><textarea name="body">'.e($mp['body']).'</textarea>';
+        echo '<label class="f">Body</label>';
+        echo '<div class="toolbar" style="margin:4px 0"><button type="button" class="btn sm" id="metaToggle">Rich text</button></div>';
+        echo '<div class="wys" data-for="meta-body" data-toggle="metaToggle" hidden></div>';
+        echo '<textarea id="meta-body" name="body" style="min-height:40vh">'.e($mp['body']).'</textarea>';
         echo '<div class="toolbar"><button class="btn primary">Save</button><a class="btn" href="'.url(['p'=>'meta_page','book'=>$book['id'],'slug'=>$mp['slug']]).'">Cancel</a></div></form>';
+        $ev = @filemtime(__DIR__ . '/assets/app/editor.js') ?: time();
+        echo '<link rel="stylesheet" href="assets/app/editor.css?v='.$ev.'"><script src="assets/app/editor.js?v='.$ev.'" defer></script>';
     } else {
         echo '<div class="toolbar"><a class="btn sm" href="'.url(['p'=>'meta_page','book'=>$book['id'],'slug'=>$mp['slug'],'edit'=>1]).'">Edit</a></div>';
         echo '<div class="entrybody">'.md_to_html($mp['body'], $book['id']).'</div>';
@@ -2352,8 +2414,8 @@ case 'meta_page':
 
 case 'notes':
     $pages = get_notes($book['id']);
-    echo '<div class="pagehead"><div><h1>Notes</h1><p class="desc">Planning docs from your Codex <span class="kbd">Notes</span> folder — outline, beats, research. Read-only here; authored in your folders and synced in.</p></div></div>';
-    if (!$pages) { echo '<p class="empty">No notes synced yet. Add markdown under <span class="mono">Codex/Notes/</span> and run a sync.</p>'; break; }
+    echo '<div class="pagehead"><div><h1>Notes</h1><p class="desc">Planning docs — outline, beats, research. Editable here (Track C3); they export as <span class="kbd">Codex/Notes/*.md</span>.</p></div></div>';
+    if (!$pages) { echo '<p class="empty">No notes yet.</p>'; break; }
     echo '<div class="cards">';
     foreach ($pages as $np) echo '<a class="card" href="'.url(['p'=>'note_page','book'=>$book['id'],'slug'=>$np['slug']]).'"><div class="ctitle">'.e($np['title']).'</div><div class="clog mono" style="font-size:12px">Codex/Notes/'.e($np['slug']).'.md</div><div class="clog">'.e(mb_substr(trim(strip_tags($np['body'])),0,120)).'…</div></a>';
     echo '</div>';
@@ -2362,9 +2424,28 @@ case 'notes':
 case 'note_page':
     $np = get_note_page($book['id'], $_GET['slug']);
     if (!$np) { echo '<p class="empty">Not found.</p>'; break; }
-    echo '<div class="pagehead"><div><h1>'.e($np['title']).'</h1><p class="desc mono" style="font-size:12px">Codex/Notes/'.e($np['slug']).'.md · folder-authored (read-only)</p></div></div>';
-    echo '<div class="toolbar"><a class="btn sm" href="'.url(['p'=>'notes','book'=>$book['id']]).'">← All notes</a></div>';
-    echo '<div class="entrybody">'.md_to_html($np['body'], $book['id']).'</div>';
+    $edit = isset($_GET['edit']) && user_can($book['id'], 'edit');
+    echo '<div class="pagehead"><div><h1>'.e($np['title']).'</h1><p class="desc mono" style="font-size:12px">Codex/Notes/'.e($np['slug']).'.md</p></div></div>';
+    if ($edit) {
+        echo '<form method="post"><input type="hidden" name="action" value="note_save"><input type="hidden" name="book" value="'.e($book['id']).'"><input type="hidden" name="slug" value="'.e($np['slug']).'">';
+        echo '<label class="f">Title</label><input type="text" name="title" value="'.e($np['title']).'">';
+        echo '<label class="f">Body</label>';
+        echo '<div class="toolbar" style="margin:4px 0"><button type="button" class="btn sm" id="noteToggle">Rich text</button></div>';
+        echo '<div class="wys" data-for="note-body" data-toggle="noteToggle" data-mentions hidden></div>';
+        echo '<textarea id="note-body" name="body" style="min-height:50vh">'.e($np['body']).'</textarea>';
+        echo '<div class="toolbar"><button class="btn primary">Save</button><a class="btn" href="'.url(['p'=>'note_page','book'=>$book['id'],'slug'=>$np['slug']]).'">Cancel</a></div></form>';
+        $tg = function_exists('build_mention_targets')
+            ? array_map(function($t){ return ['phrase'=>$t['phrase'],'slug'=>$t['slug']]; }, build_mention_targets($book['id']))
+            : [];
+        echo '<script>window.__scene='.json_encode(['book'=>$book['id'],'targets'=>$tg], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES).';</script>';
+        $ev = @filemtime(__DIR__ . '/assets/app/editor.js') ?: time();
+        echo '<link rel="stylesheet" href="assets/app/editor.css?v='.$ev.'"><script src="assets/app/editor.js?v='.$ev.'" defer></script>';
+    } else {
+        echo '<div class="toolbar"><a class="btn sm" href="'.url(['p'=>'notes','book'=>$book['id']]).'">← All notes</a>'
+           . (user_can($book['id'], 'edit') ? '<a class="btn sm" href="'.url(['p'=>'note_page','book'=>$book['id'],'slug'=>$np['slug'],'edit'=>1]).'">Edit</a>' : '')
+           . '</div>';
+        echo '<div class="entrybody">'.md_to_html($np['body'], $book['id']).'</div>';
+    }
     break;
 
 case 'plot':
@@ -2543,6 +2624,33 @@ case 'sync':
     echo '<div class="toolbar"><a class="btn" href="api.php?action=export&token='.e($token).'" target="_blank">Download current snapshot.json</a></div></div>';
     break;
 
+case 'claude':   // Track B4 — the "Working with Claude" onboarding guide
+    $mcpUrl = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http')
+            . '://' . ($_SERVER['HTTP_HOST'] ?? 'your-host') . '/mcp';
+    echo '<div class="pagehead"><div><h1>Working with Claude</h1><p class="desc">Connect Claude to your Codex and it becomes a co-worker: it reads your entries and chapters, runs the tasks you flag, and logs your writing — as you, with your permissions.</p></div></div>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">1 · Connect</h2>'
+       . '<p style="font-size:13.5px">In Claude, open <strong>Settings → Connectors → Add custom connector</strong> and paste:</p>'
+       . '<div class="fieldtable"><div class="row"><div class="lbl">Connector URL</div><div class="v mono" style="word-break:break-all">'.e($mcpUrl).'</div></div></div>'
+       . '<p class="muted" style="font-size:12.5px;margin-top:8px">Claude will ask you to sign in with your account here and approve the connection — no keys to copy. (Fallback for older clients: mint a token on <a href="?p=account">Account</a> and use <span class="mono">'.e($mcpUrl).'?k=&lt;token&gt;</span>.) Enable the connector per-conversation from the <strong>+</strong> menu. You can disconnect any time from <a href="?p=account">Account → Connected apps</a>.</p></div>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">2 · What Claude can do</h2>'
+       . '<p style="font-size:13.5px">Everything is scoped to <em>your</em> books at <em>your</em> role, and every change lands in the book\'s activity log under your name. Claude can:</p>'
+       . '<ul style="font-size:13.5px;line-height:1.7;margin:6px 0 0 18px">'
+       . '<li><strong>Read</strong> — entries, chapters (full prose), search with snippets, and the Smart-editing diagnostics.</li>'
+       . '<li><strong>Write</strong> — create and update entries and chapters, keep the plot straight, fill the writing log.</li>'
+       . '<li><strong>Run your tasks</strong> — anything on the Tasks page flagged <em>for Claude</em>, and leave new tasks for you.</li>'
+       . '</ul></div>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">3 · Things to say</h2>'
+       . '<ul style="font-size:13.5px;line-height:1.8;margin:0 0 0 18px">'
+       . '<li>“Check my Codex for tasks and run them.”</li>'
+       . '<li>“Search my book for everything about the northern watchtower.”</li>'
+       . '<li>“Read chapter 4 and check it against Aria\'s entry for contradictions.”</li>'
+       . '<li>“Draft a Codex entry for the character I just described.”</li>'
+       . '<li>“Fill in my writing log for today.”</li>'
+       . '<li>“What do the diagnostics flag in chapter 2?”</li>'
+       . '</ul>'
+       . '<p class="muted" style="font-size:12.5px;margin-top:8px">House rules Claude follows: it never invents canon, never hard-deletes, and a refused save (someone else edited meanwhile) comes back to you instead of overwriting.</p></div>';
+    break;
+
 case 'account':
     $me = current_user();
     echo '<div class="pagehead"><div><h1>Account</h1><p class="desc">Your sign-in details for Stephen\'s Codex.</p></div>'
@@ -2559,9 +2667,31 @@ case 'account':
        . '<label class="f">New password</label><input type="password" name="password" required>'
        . '<label class="f">Confirm new password</label><input type="password" name="password2" required>'
        . '<div class="toolbar"><button class="btn primary">Update password</button></div></form></div>';
+    // Connect Claude (Track B4) — the front door for the MCP: OAuth sign-in
+    // (B3) as the main path, personal tokens as the fallback below.
+    $mcpUrl = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http')
+            . '://' . ($_SERVER['HTTP_HOST'] ?? 'your-host') . '/mcp';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Connect Claude</h2>';
+    echo '<p class="muted" style="font-size:12.5px">Claude can read and edit your books directly — your books, your role, your name in the activity log. In Claude go to <strong>Settings → Connectors → Add custom connector</strong> and paste this URL, then sign in with this account when Claude asks:</p>';
+    echo '<div class="fieldtable"><div class="row"><div class="lbl">Connector URL</div><div class="v mono" style="word-break:break-all">'.e($mcpUrl).'</div></div></div>';
+    echo '<p class="muted" style="font-size:12px;margin-top:8px">If your Claude can\'t sign in (older clients), create an API token below and use <span class="mono">'.e($mcpUrl).'?k=&lt;token&gt;</span> instead. See <a href="?p=claude">Working with Claude</a> for what to say once connected.</p>';
+    echo '</div>';
+    // Connected apps (Track B3) — OAuth grants; disconnecting kills the app's tokens.
+    require_once dirname(__DIR__) . '/src/oauth.php';
+    $grants = list_oauth_grants((int)$me['id']);
+    if ($grants) {
+        echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">Connected apps</h2>';
+        echo '<table class="grid"><thead><tr><th>App</th><th>Connected</th><th>Last used</th><th></th></tr></thead><tbody>';
+        foreach ($grants as $g) {
+            echo '<tr><td>'.e($g['client_name'] ?: 'Unnamed app').'</td><td class="muted mono">'.e(substr((string)$g['created_at'],0,10)).'</td>'
+               . '<td class="muted mono">'.e($g['last_used_at'] ? substr($g['last_used_at'],0,16) : 'never').'</td>'
+               . '<td><form method="post" style="margin:0" onsubmit="return confirm(\'Disconnect this app? It will have to sign in again.\')"><input type="hidden" name="action" value="account_grant_revoke"><input type="hidden" name="id" value="'.(int)$g['id'].'"><button class="btn sm">Disconnect</button></form></td></tr>';
+        }
+        echo '</tbody></table></div>';
+    }
     // API tokens (Phase 20) — a per-user credential Claude / the MCP uses to act
     // as you. Each token can read/write exactly the books you can.
-    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">API tokens (Claude / MCP)</h2>';
+    echo '<div class="notewrap"><h2 style="margin-top:0;font-size:15px">API tokens (Claude / MCP fallback)</h2>';
     echo '<p class="muted" style="font-size:12.5px">A token lets Claude act as you through the MCP — it can reach only the books you\'re a member of, at your role. Treat it like a password; revoke it if it leaks.</p>';
     if (!empty($_SESSION['__new_token'])) {
         $nt = $_SESSION['__new_token']; unset($_SESSION['__new_token']);
