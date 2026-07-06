@@ -18,10 +18,16 @@ class ApiError(RuntimeError):
 
 
 class CodexApi:
-    def __init__(self, base_url: str, token: str, timeout: int = 30):
+    def __init__(self, base_url: str, token, timeout: int = 30):
+        """`token` is a string, or a zero-arg callable resolved per request —
+        the MCP server passes each caller's own token through (Track B1), so
+        api.php scopes every call to that user instead of the service identity."""
         self.base_url = base_url
         self.token = token
         self.timeout = timeout
+
+    def _token(self) -> str:
+        return self.token() if callable(self.token) else self.token
 
     def _call(self, action: str, body: Optional[dict] = None, params: Optional[dict] = None) -> Any:
         qs = {"action": action}
@@ -29,7 +35,7 @@ class CodexApi:
             qs.update({k: v for k, v in params.items() if v is not None})
         url = self.base_url + "?" + urllib.parse.urlencode(qs)
         data = None
-        headers = {"X-Codex-Token": self.token, "Accept": "application/json"}
+        headers = {"X-Codex-Token": self._token(), "Accept": "application/json"}
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -64,6 +70,28 @@ class CodexApi:
 
     def get_writing_log(self, book: Optional[str] = None) -> List[dict]:
         return (self._call("writing-log", params={"book": book}) or {}).get("writing_log", [])
+
+    # --- granular object reads (standalone plan, A3) ---
+    def get_chapter(self, book: str, chapter=None, file: Optional[str] = None) -> dict:
+        p = {"book": book, "id": chapter, "file": file}
+        return (self._call("chapter", params=p) or {}).get("chapter", {})
+
+    def list_entries(self, book: str, db: Optional[str] = None) -> List[dict]:
+        return (self._call("entries", params={"book": book, "db": db}) or {}).get("entries", [])
+
+    def search(self, query: str, book: Optional[str] = None, limit: int = 25) -> List[dict]:
+        p = {"q": query, "book": book, "limit": limit}
+        return (self._call("search", params=p) or {}).get("hits", [])
+
+    def get_diagnostics(self, book: str, chapter) -> dict:
+        return (self._call("diagnostics", params={"book": book, "id": chapter}) or {}).get("diagnostics", {})
+
+    # --- granular writes ---
+    def create_task(self, task: dict) -> dict:
+        return self._call("task_create", body=task)
+
+    def update_task(self, task: dict) -> dict:
+        return self._call("task_update", body=task)
 
     # --- write (single DB-writer path) ---
     def push(self, books: list) -> dict:

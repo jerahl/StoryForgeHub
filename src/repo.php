@@ -2229,3 +2229,95 @@ function format_citation($s) {
     if ($out === '') $out = (string)($s['cite_key'] ?? 'untitled source');
     return $out;
 }
+
+/* =====================================================================
+   Granular API reads/writes (standalone plan, Track A3 — MCP surface)
+
+   Server-side search + object-level chapter access, so the MCP stops
+   round-tripping whole-snapshot exports. Pure reads over the same scoped
+   data the web UI shows; api.php enforces caps before calling these.
+   ===================================================================== */
+
+/** ~50 chars of context either side of the first case-insensitive match,
+ *  whitespace collapsed. Empty when the needle only matched metadata. */
+function search_snippet($text, $q, $ctx = 50) {
+    $text = (string)$text;
+    if ($text === '') return '';
+    $pos = mb_stripos($text, $q);
+    if ($pos === false) return '';
+    $start = max(0, $pos - $ctx);
+    $frag = mb_substr($text, $start, mb_strlen($q) + 2 * $ctx);
+    $frag = trim(preg_replace('/\s+/u', ' ', $frag));
+    return ($start > 0 ? '…' : '') . $frag . (($start + mb_strlen($q) + 2 * $ctx) < mb_strlen($text) ? '…' : '');
+}
+
+/** Search entries, chapters, and notes across the given (already scoped)
+ *  book ids. Returns hits: {kind, book, snippet, ...kind-specific keys}. */
+function search_codex(array $book_ids, $q, $limit = 25) {
+    $q = trim((string)$q);
+    $limit = max(1, min(100, (int)$limit));
+    if ($q === '' || !$book_ids) return [];
+    $like = '%' . str_replace(['!', '%', '_'], ['!!', '!%', '!_'], $q) . '%';
+    $in = implode(',', array_fill(0, count($book_ids), '?'));
+    $hits = [];
+
+    $rows = all("SELECT e.book_id, e.db_key, e.slug, e.name, e.status,
+                        (SELECT s.body FROM entry_sections s WHERE s.entry_id=e.id
+                           AND s.body LIKE ? ESCAPE '!' ORDER BY s.sort_order LIMIT 1) AS sec_body
+                   FROM entries e
+                  WHERE e.book_id IN ($in) AND (e.name LIKE ? ESCAPE '!' OR e.slug LIKE ? ESCAPE '!'
+                     OR EXISTS (SELECT 1 FROM entry_fields f WHERE f.entry_id=e.id AND f.value LIKE ? ESCAPE '!')
+                     OR EXISTS (SELECT 1 FROM entry_sections s2 WHERE s2.entry_id=e.id AND s2.body LIKE ? ESCAPE '!'))
+                  ORDER BY e.name LIMIT $limit",
+                array_merge([$like], $book_ids, [$like, $like, $like, $like]));
+    foreach ($rows as $r) {
+        $hits[] = ['kind' => 'entry', 'book' => $r['book_id'], 'db' => $r['db_key'],
+                   'slug' => $r['slug'], 'name' => $r['name'], 'status' => $r['status'],
+                   'snippet' => search_snippet($r['sec_body'] ?? '', $q)];
+    }
+
+    if (count($hits) < $limit) {
+        $rows = all("SELECT book_id, id, num, title, file, body FROM chapters
+                      WHERE book_id IN ($in) AND status<>'archived'
+                        AND (title LIKE ? ESCAPE '!' OR body LIKE ? ESCAPE '!')
+                      ORDER BY (num+0), num LIMIT " . ($limit - count($hits)),
+                    array_merge($book_ids, [$like, $like]));
+        foreach ($rows as $r) {
+            $hits[] = ['kind' => 'chapter', 'book' => $r['book_id'], 'id' => (int)$r['id'],
+                       'num' => $r['num'], 'title' => $r['title'], 'file' => $r['file'],
+                       'snippet' => search_snippet($r['body'], $q)];
+        }
+    }
+
+    if (count($hits) < $limit) {
+        ensure_note_pages();
+        $rows = all("SELECT book_id, slug, title, body FROM note_pages
+                      WHERE book_id IN ($in) AND (title LIKE ? ESCAPE '!' OR body LIKE ? ESCAPE '!')
+                      ORDER BY slug LIMIT " . ($limit - count($hits)),
+                    array_merge($book_ids, [$like, $like]));
+        foreach ($rows as $r) {
+            $hits[] = ['kind' => 'note', 'book' => $r['book_id'], 'slug' => $r['slug'],
+                       'title' => $r['title'], 'snippet' => search_snippet($r['body'], $q)];
+        }
+    }
+    return $hits;
+}
+
+/** One chapter as the API returns it — metadata plus the Markdown body (the
+ *  read the MCP never had). Lookup by id or by bare filename. */
+function chapter_struct($book_id, $id = null, $file = null) {
+    if ($id !== null && $id !== '') {
+        $c = one("SELECT * FROM chapters WHERE id=? AND book_id=?", [(int)$id, $book_id]);
+    } elseif ($file) {
+        $base = basename(str_replace('\\', '/', (string)$file));
+        $c = one("SELECT * FROM chapters WHERE book_id=? AND (file=? OR file LIKE ?)",
+                 [$book_id, $base, '%/' . $base]);
+    } else {
+        return null;
+    }
+    if (!$c) return null;
+    return ['id' => (int)$c['id'], 'book' => $c['book_id'], 'num' => $c['num'],
+            'title' => $c['title'], 'status' => $c['status'], 'words' => $c['words'],
+            'file' => $c['file'], 'act_id' => $c['act_id'] ?? null,
+            'body' => (string)$c['body'], 'body_hash' => md_body_hash($c['body'])];
+}

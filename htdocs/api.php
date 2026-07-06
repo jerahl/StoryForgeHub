@@ -60,6 +60,74 @@ case 'pull':            // web -> folder   ?book=ID   (get_book(s) is already sc
     if (!$IS_SERVICE && isset($_GET['book'])) require_cap($_GET['book'], 'view');
     out(['ok' => true] + pull_files($_GET['book'] ?? null));
 
+/* ---- granular object actions (standalone plan, Track A3 — the MCP surface) ---- */
+
+case 'chapter':         // ?book=ID&id=N | ?book=ID&file=ch01.md  → metadata + body
+    $bookParam = $_GET['book'] ?? '';
+    if (!$bookParam) out(['error' => 'book is required'], 400);
+    if (!$IS_SERVICE) require_cap($bookParam, 'view');
+    $c = chapter_struct($bookParam, $_GET['id'] ?? null, $_GET['file'] ?? null);
+    if (!$c) out(['error' => 'chapter not found'], 404);
+    out(['ok' => true, 'chapter' => $c]);
+
+case 'entries':         // ?book=ID[&db=characters]  → entry summaries, no bodies
+    $bookParam = $_GET['book'] ?? '';
+    if (!$bookParam) out(['error' => 'book is required'], 400);
+    if (!$IS_SERVICE) require_cap($bookParam, 'view');
+    $list = [];
+    foreach (get_entries($bookParam, $_GET['db'] ?? null) as $r) {
+        $list[] = ['db' => $r['db_key'], 'slug' => $r['slug'], 'name' => $r['name'],
+                   'status' => $r['status'], 'type' => $r['type'], 'detail' => $r['detail']];
+    }
+    out(['ok' => true, 'entries' => $list]);
+
+case 'search':          // ?q=...&book=ID&limit=25  → entries/chapters/notes with snippets
+    $q = trim((string)($_GET['q'] ?? ''));
+    if ($q === '') out(['error' => 'q is required'], 400);
+    $bookParam = $_GET['book'] ?? null;
+    if ($bookParam) {
+        if (!$IS_SERVICE) require_cap($bookParam, 'view');
+        $ids = [$bookParam];
+    } else {
+        $ids = scoped_ids();                     // the caller's books (all, for service)
+    }
+    out(['ok' => true, 'hits' => search_codex($ids, $q, (int)($_GET['limit'] ?? 25))]);
+
+case 'diagnostics':     // ?book=ID&id=N  → the Smart-editing prose analysis
+    $bookParam = $_GET['book'] ?? '';
+    if (!$bookParam) out(['error' => 'book is required'], 400);
+    if (!$IS_SERVICE) require_cap($bookParam, 'view');
+    $d = get_chapter_diagnostics($bookParam, (int)($_GET['id'] ?? 0));
+    if (!$d) out(['error' => 'chapter not found'], 404);
+    $c = $d['chapter'];
+    out(['ok' => true, 'diagnostics' => [
+        'chapter' => ['id' => (int)$c['id'], 'num' => $c['num'], 'title' => $c['title'], 'file' => $c['file']],
+        'data' => $d['data'], 'cached' => !empty($d['cached'])]]);
+
+case 'task_create':     // POST {book,title,body?,for_claude?,priority?}
+    if (!$body || trim((string)($body['title'] ?? '')) === '') out(['error' => 'expected {book,title,...}'], 400);
+    $bookParam = (string)($body['book'] ?? '');
+    if (!get_book($bookParam)) out(['error' => 'unknown book'], 400);
+    if (!$IS_SERVICE) require_cap($bookParam, 'edit');
+    $id = save_task(['book_id' => $bookParam, 'title' => trim((string)$body['title']),
+                     'body' => (string)($body['body'] ?? ''), 'status' => 'todo',
+                     'for_claude' => !empty($body['for_claude']),
+                     'priority' => in_array($body['priority'] ?? 'med', ['low','med','high'], true) ? $body['priority'] : 'med']);
+    out(['ok' => true, 'task' => get_task($id)]);
+
+case 'task_update':     // POST {id, status?|result?|title?|body?}  (merge patch)
+    if (!$body || empty($body['id'])) out(['error' => 'expected {id,...}'], 400);
+    $t = get_task((int)$body['id']);
+    if (!$t) out(['error' => 'task not found'], 404);
+    if (!$IS_SERVICE) require_cap($t['book_id'], 'edit');
+    if (isset($body['status']) && !in_array($body['status'], ['todo','doing','done'], true))
+        out(['error' => 'status must be todo|doing|done'], 400);
+    $patch = array_intersect_key($body, array_flip(['status','result','title','body']));
+    if (!$patch) out(['error' => 'nothing to update'], 400);
+    if (isset($patch['title']) && trim((string)$patch['title']) === '') out(['error' => 'title cannot be empty'], 400);
+    save_task(array_merge($t, $patch, ['id' => (int)$t['id']]));
+    out(['ok' => true, 'task' => get_task((int)$t['id'])]);
+
 case 'tasks':           // ?book=ID&for_claude=1&status=todo
     $filters = [];
     if (isset($_GET['for_claude'])) $filters['for_claude'] = (int)$_GET['for_claude'];
@@ -120,5 +188,5 @@ case 'import':          // load a canonical snapshot — global op, admin/servic
     out(['ok' => true, 'books' => count($body['books'])]);
 
 default:
-    out(['error' => 'unknown action', 'actions' => ['ping','push','pull','tasks','apply','writing-log','export','import']], 400);
+    out(['error' => 'unknown action', 'actions' => ['ping','push','pull','chapter','entries','search','diagnostics','tasks','task_create','task_update','apply','writing-log','export','import']], 400);
 }

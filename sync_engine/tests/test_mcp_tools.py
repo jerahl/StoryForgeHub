@@ -15,6 +15,7 @@ class FakeApi:
     def __init__(self):
         self.applied = []
         self.pushed = []
+        self.calls = []
         self._export = {"books": [{"book": {"id": "b1", "folder": "book-one"},
                                    "entries": [E("aria", "Aria", body="captain"), E("bram", "Bram")],
                                    "chapters": [{"num": "01", "title": "The Wall", "status": "drafted",
@@ -26,6 +27,19 @@ class FakeApi:
     def get_tasks(self, book=None, for_claude=None, status=None): return [{"id": 4, "title": "x"}]
     def apply(self, payload): self.applied.append(payload); return {"ok": True, "report": {"tasks": 1}}
     def push(self, books): self.pushed.append(books); return {"ok": True, "report": {"entries": 1}}
+    # granular actions (Track A3/B2) — record the call, echo a plausible shape
+    def search(self, q, book=None, limit=25):
+        self.calls.append(("search", q, book, limit)); return [{"kind": "entry", "slug": "aria"}]
+    def get_chapter(self, book, chapter=None, file=None):
+        self.calls.append(("chapter", book, chapter, file)); return {"id": 7, "body": "# One"}
+    def list_entries(self, book, db=None):
+        self.calls.append(("entries", book, db)); return [{"db": "characters", "slug": "aria"}]
+    def get_diagnostics(self, book, chapter):
+        self.calls.append(("diagnostics", book, chapter)); return {"data": {"flags": []}}
+    def create_task(self, task):
+        self.calls.append(("task_create", task)); return {"ok": True, "task": {"id": 9, **task}}
+    def update_task(self, patch):
+        self.calls.append(("task_update", patch)); return {"ok": True, "task": {"id": patch["id"]}}
 
 
 class Tools(unittest.TestCase):
@@ -39,9 +53,47 @@ class Tools(unittest.TestCase):
         self.assertEqual(s["entries"], 2)
         self.assertEqual(s["chapters"], 2)
 
-    def test_search(self):
-        self.assertEqual([h["slug"] for h in self.t.search("captain")], ["aria"])
-        self.assertEqual(self.t.search("nonexistent"), [])
+    def test_search_delegates_to_server(self):
+        hits = self.t.search("  captain  ", "b1", 10)
+        self.assertEqual(hits[0]["slug"], "aria")
+        self.assertEqual(self.api.calls[-1], ("search", "captain", "b1", 10))
+        self.assertEqual(self.t.search("   "), [])     # blank query never hits the API
+        self.assertEqual(len(self.api.calls), 1)
+
+    def test_get_chapter(self):
+        c = self.t.get_chapter("b1", 7)
+        self.assertEqual(c["body"], "# One")
+        self.assertEqual(self.api.calls[-1], ("chapter", "b1", 7, None))
+        self.t.get_chapter("b1", file="ch01.md")
+        self.assertEqual(self.api.calls[-1], ("chapter", "b1", None, "ch01.md"))
+        with self.assertRaises(ValueError):
+            self.t.get_chapter("b1")                   # neither id nor file
+
+    def test_list_entries(self):
+        self.t.list_entries("b1", "characters")
+        self.assertEqual(self.api.calls[-1], ("entries", "b1", "characters"))
+
+    def test_get_diagnostics(self):
+        self.t.get_diagnostics("b1", 7)
+        self.assertEqual(self.api.calls[-1], ("diagnostics", "b1", 7))
+
+    def test_create_task_shape(self):
+        self.t.create_task("b1", " Fix ch2 ", "details", for_claude=True, priority="high")
+        kind, task = self.api.calls[-1]
+        self.assertEqual(task, {"book": "b1", "title": "Fix ch2", "body": "details",
+                                "for_claude": True, "priority": "high"})
+        with self.assertRaises(ValueError):
+            self.t.create_task("b1", "   ")
+        with self.assertRaises(ValueError):
+            self.t.create_task("b1", "x", priority="urgent")
+
+    def test_update_task_patch(self):
+        self.t.update_task(9, status="done", result="ok")
+        self.assertEqual(self.api.calls[-1], ("task_update", {"id": 9, "status": "done", "result": "ok"}))
+        with self.assertRaises(ValueError):
+            self.t.update_task(9)                      # empty patch
+        with self.assertRaises(ValueError):
+            self.t.update_task(9, status="blocked")    # not a real status
 
     def test_get_entry_renders_md(self):
         md = self.t.get_entry("b1", "characters", "aria")

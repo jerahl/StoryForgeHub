@@ -1,3 +1,7 @@
 # Local dev database (SQLite) and misc scratch
 *.sqlite
 *.sqlite-journal
+
+# Python bytecode (never commit)
+__pycache__/
+*.pyc

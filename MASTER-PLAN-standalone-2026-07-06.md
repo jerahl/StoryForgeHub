@@ -176,6 +176,15 @@ here. Each action is small because the repo functions all exist.
 
 **Contract impact:** additive. **Effort:** ~1–1.5 sessions.
 
+**Status (2026-07-06): first slice DONE with B1/B2.** `api.php` gained `chapter`
+(metadata + body + `body_hash`), `entries` (summaries), `search` (server-side over
+entries/chapters/notes with snippets, LIKE-escaped, archived chapters excluded),
+`diagnostics`, `task_create`, and `task_update` (merge-patch), all behind
+`require_cap`; backed by `search_codex()`/`chapter_struct()` in `src/repo.php`
+(fixture-tested on sqlite in `tests/php/api_actions_test.php`). Remaining for the
+full A3: `save_chapter`/`create_chapter` with the base-hash rule (wants A2),
+entry CRUD actions, scenes/acts/plot-board/threads/sources, and pagination.
+
 ### A4 — Cutover and demolition
 
 1. Run **mirror mode + parallel timer** for a week or two of real use; confirm the
@@ -210,6 +219,16 @@ admin automation.
 Every MCP write now lands in the Phase 19 activity log as the real person.
 **Effort:** ~0.5 session. **Unblocks:** giving co-authors MCP access *today*.
 
+**Status (2026-07-06): DONE.** `mcp_auth.py` (stdlib-only `TokenGate`: constant-time
+service check, personal tokens validated via an api.php ping and cached 60s so a
+revoked token dies within a minute) + a pure-ASGI middleware in `mcp_server.py` that
+rides the caller's token on a contextvar into every api.php call. FastMCP now runs
+**stateless**, so each tool call executes inside the request that authenticated it —
+interleaved sessions with different identities can't bleed (e2e-verified).
+`codex_sync` refuses personal tokens (service-only until Track A retires it).
+Gates: `tests/test_mcp_auth.py` offline; `tests/e2e/run.sh` boots the real
+php -S + uvicorn stack and drives it as three identities via the MCP client SDK.
+
 ### B2 — Tool surface v2 (thin, granular, scoped)
 
 Rebuild `mcp_tools.py` as a thin client of the A3 actions. Target surface:
@@ -229,6 +248,15 @@ Rebuild `mcp_tools.py` as a thin client of the A3 actions. Target surface:
 
 Structured, paginated outputs throughout — no more whole-snapshot reads.
 **Depends:** A3 (parts work off existing actions immediately). **Effort:** ~1–1.5 sessions.
+
+**Status (2026-07-06): core DONE.** New tools shipped on the A3 actions:
+`codex_get_chapter` (body at last), `codex_search` (server-side snippets over
+entries/chapters/notes), `codex_list_entries`, `codex_get_diagnostics`,
+`codex_create_task`, `codex_update_task`; `codex_sync` is service-token-only.
+Still open: the base-hash-guarded `save_chapter` refusal-with-diff flow (needs
+A2/A3), MCP resources + prompts, migrating `codex_get_entry`/`codex_list_chapters`/
+`codex_status` off the `export` snapshot, and dropping the folder-shaped push verbs
+at the A4 cutover.
 
 ### B3 — OAuth for Claude connectors *(the real multi-user story)*
 
