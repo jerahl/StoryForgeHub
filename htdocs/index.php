@@ -44,6 +44,7 @@ function book_gate($a) {
         /* --- edit, target book from the explicit `book` field (mutators confine
               their writes to that book, so the field is authoritative here) --- */
         case 'entry_save': case 'entry_new': case 'entry_delete': case 'meta_save':
+        case 'entry_revision_restore':   // A1: restore = a new save, same capability
         case 'task_save': case 'log_add': case 'scene_label': case 'progression_when':
         case 'reindex_mentions': case 'chapter_save': case 'chapter_new': case 'chapter_import':
         case 'dictionary_add': case 'dictionary_remove': case 'dictionary_import_codex':
@@ -150,6 +151,18 @@ if ($method === 'POST') {
         rebuild_threads($book);
         log_activity($book, 'entry_save', $db.'/'.$e['name']);
         flash('Saved “' . $e['name'] . '”.');
+        redirect(['p'=>'entry','book'=>$book,'db'=>$db,'slug'=>$e['slug']]);
+    }
+    if ($a === 'entry_revision_restore') {   // A1: restore = a new save on top, never a rewind
+        $db = $_POST['db']; $slug = $_POST['slug'];
+        $rev = get_entry_revision($book, (int)($_POST['id'] ?? 0));
+        if (!$rev || $rev['db_key'] !== $db || $rev['slug'] !== $slug) { flash('Revision not found.', 'err'); redirect(['p'=>'entry','book'=>$book,'db'=>$db,'slug'=>$slug]); }
+        $e = md_parse_entry($rev['body'], $db, $slug);
+        if (!$e['slug']) $e['slug'] = $slug;
+        save_entry($book, $db, $e);
+        rebuild_threads($book);
+        log_activity($book, 'entry_restore', $db.'/'.$e['name'].' ← '.substr((string)$rev['created_at'],0,16));
+        flash('Restored “'.$e['name'].'” from '.substr((string)$rev['created_at'],0,16).'.');
         redirect(['p'=>'entry','book'=>$book,'db'=>$db,'slug'=>$e['slug']]);
     }
     if ($a === 'entry_new') {
@@ -717,8 +730,8 @@ case 'library':
     }
     echo '</div>';
 
-    // ---- New book / Import book (Markdown-canonical; gated on CODEX_BOOKS_DIR) ----
-    if (books_dir_set()) {
+    // ---- New book / Import book (DB-canonical, A2 — always available) ----
+    {
         $profOpts = '';
         foreach (profile_ids() as $pid) $profOpts .= '<option value="'.e($pid).'">'.e(profile_label($pid)).'</option>';
         echo '<div class="toolbar" style="margin-top:22px">';
@@ -731,16 +744,14 @@ case 'library':
         echo '<div class="formrow"><div><label class="f">Profile</label><select name="profile">'.$profOpts.'</select></div>'
            . '<div><label class="f">Dot colour</label><input type="color" name="dot" value="#4A4391" style="width:64px;padding:2px;height:36px"></div></div>';
         echo '<div class="toolbar"><button class="btn primary">Create book</button></div>';
-        echo '<p class="muted" style="font-size:12px">Creates the folder skeleton on disk (Manuscript/ + Codex/) and the book row. Markdown stays canonical.</p></form></details>';
+        echo '<p class="muted" style="font-size:12px">Creates the book with its databases and an empty manuscript. Markdown stays the dialect everywhere.</p></form></details>';
         echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">Import book (.zip)</summary>';
         echo '<form method="post" enctype="multipart/form-data" style="margin-top:12px"><input type="hidden" name="action" value="book_import">';
         echo '<label class="f">Zipped book folder</label><input type="file" name="file" accept=".zip" required>';
         echo '<label class="f" style="margin-top:8px">Profile</label><select name="profile">'.$profOpts.'</select>';
         echo '<div class="toolbar"><button class="btn">Import .zip</button></div>';
-        echo '<p class="muted" style="font-size:12px">Upload a zip containing a book folder with <span class="mono">Codex/</span> and <span class="mono">Manuscript/</span>. It unzips under your books root (a fresh folder — never over an existing book) and reflects into the app.</p></form></details>';
+        echo '<p class="muted" style="font-size:12px">Upload a zip containing a book folder with <span class="mono">Codex/</span> and <span class="mono">Manuscript/</span>. It loads as a fresh book — never over an existing one.</p></form></details>';
         echo '</div>';
-    } else {
-        echo '<p class="muted" style="margin-top:22px">Set <span class="mono">CODEX_BOOKS_DIR</span> to enable creating and importing books in the app (Markdown stays the source of truth).</p>';
     }
     break;
 
@@ -954,6 +965,28 @@ case 'entry':
         }
         echo '</div></div>';
     }
+    // --- History (A1): every save through any door, restorable ---
+    $erevs = get_entry_revisions($book['id'], $db, $slug);
+    if ($erevs && user_can($book['id'], 'edit')) {
+        echo '<details class="entrybody" style="margin-top:14px"><summary style="cursor:pointer;font-weight:600">History <span class="muted mono">'.count($erevs).'</span></summary>';
+        echo '<p class="desc">Saved versions of this entry (newest first). Restoring makes a new save on top — nothing is rewound or lost.</p>';
+        foreach ($erevs as $i => $rv) {
+            $who = $rv['saved_by_name'] ?: ($rv['saved_via'] === 'api' ? 'Claude / API' : ($rv['saved_via'] === 'cli' ? 'CLI' : '—'));
+            $via = $rv['saved_via'] ? ' · '.e($rv['saved_via']) : '';
+            echo '<details style="margin:6px 0"><summary style="cursor:pointer" class="mono">'
+               . e(substr((string)$rv['created_at'],0,16)).' · '.e($who).$via.($rv['kind']!=='save'?' · '.e($rv['kind']):'').($i===0?' · current':'').'</summary>';
+            $full = get_entry_revision($book['id'], (int)$rv['id']);
+            echo '<div class="codeblock" style="margin:8px 0">'.e($full['body']).'</div>';
+            if ($i !== 0) {
+                echo '<form method="post" style="margin:0 0 8px" onsubmit="return confirm(\'Restore this version? The current version stays in history.\')">'
+                   . '<input type="hidden" name="action" value="entry_revision_restore"><input type="hidden" name="book" value="'.e($book['id']).'">'
+                   . '<input type="hidden" name="db" value="'.e($db).'"><input type="hidden" name="slug" value="'.e($slug).'">'
+                   . '<input type="hidden" name="id" value="'.(int)$rv['id'].'"><button class="btn sm">Restore this version</button></form>';
+            }
+            echo '</details>';
+        }
+        echo '</details>';
+    }
     break;
 
 case 'entry_md':
@@ -1038,8 +1071,8 @@ case 'manuscript':
        . '<form method="post" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="reindex_mentions"><input type="hidden" name="book" value="'.e($book['id']).'"><button class="btn sm" title="Rebuild the name/alias mention index for this book">Reindex mentions</button></form>'
        . '<a class="btn sm" style="margin-left:8px" href="'.url(['p'=>'dictionary','book'=>$book['id']]).'" title="Custom spell-check dictionary">Dictionary</a></div>';
 
-    // ---- New chapter / Import chapter(s) (Markdown-canonical; gated on CODEX_BOOKS_DIR) ----
-    if (books_dir_set()) {
+    // ---- New chapter / Import chapter(s) (DB-canonical, A2 — always available) ----
+    {
         $mb = bands_for($book['profile'] ?? 'fiction');   // "Chapter" copy; act/part-aware assign label
         $acts = get_acts($book['id']);
         $bh = '<input type="hidden" name="book" value="'.e($book['id']).'">';
@@ -1054,7 +1087,7 @@ case 'manuscript':
             echo '</select></div>';
         }
         echo '</div><div class="toolbar"><button class="btn primary">Create &amp; edit</button></div>';
-        echo '<p class="muted" style="font-size:12px">Seeds <span class="mono">Manuscript/ch-NN-title.md</span> with a heading, then opens the editor. Never overwrites an existing file.</p></form></details>';
+        echo '<p class="muted" style="font-size:12px">Creates <span class="mono">ch-NN-title.md</span> seeded with a heading, then opens the editor. Never overwrites an existing chapter.</p></form></details>';
         echo '<details class="notewrap" style="flex:1;min-width:280px"><summary style="cursor:pointer;font-weight:600">Import chapter(s)</summary>';
         echo '<form method="post" enctype="multipart/form-data" style="margin-top:12px"><input type="hidden" name="action" value="chapter_import">'.$bh;
         echo '<label class="f">Upload .md file(s)</label><input type="file" name="files[]" accept=".md,.markdown,.txt" multiple>';
@@ -1065,7 +1098,7 @@ case 'manuscript':
         echo '</div>';
     }
 
-    if (!$ch && !$arch) { echo '<p class="empty">No chapters synced yet.'.(books_dir_set() ? ' Create one above.' : '').'</p>'; break; }
+    if (!$ch && !$arch) { echo '<p class="empty">No chapters yet. Create one above.</p>'; break; }
     if ($view === 'grid' && $ch) {
         // Act bands → chapter columns → scene cards (read-only). Acts have no CRUD
         // yet, so chapters with no act_id fall into a single "Chapters" band.

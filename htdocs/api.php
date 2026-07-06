@@ -13,6 +13,7 @@ require_once dirname(__DIR__) . '/src/oauth.php'; // OAuth access tokens (Track 
 header('Content-Type: application/json; charset=utf-8');
 
 $CFG = cfg();
+$GLOBALS['__save_via'] = 'api';   // A1: revision attribution — this door is the API/MCP
 function out($data, $code = 200) { http_response_code($code); echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); exit; }
 
 /* ---- auth: service token OR per-user token ---- */
@@ -107,6 +108,52 @@ case 'diagnostics':     // ?book=ID&id=N  → the Smart-editing prose analysis
         'chapter' => ['id' => (int)$c['id'], 'num' => $c['num'], 'title' => $c['title'], 'file' => $c['file']],
         'data' => $d['data'], 'cached' => !empty($d['cached'])]]);
 
+case 'save_chapter':    // POST {book, id?|file?, markdown, base_hash?} — the A3 write
+    if (!$body || !isset($body['markdown'])) out(['error' => 'expected {book, id|file, markdown, base_hash?}'], 400);
+    $bookParam = (string)($body['book'] ?? '');
+    if (!get_book($bookParam)) out(['error' => 'unknown book'], 400);
+    if (!$IS_SERVICE) require_cap($bookParam, 'edit');
+    $c = chapter_struct($bookParam, $body['id'] ?? null, $body['file'] ?? null);
+    if (!$c) {
+        // No such chapter: create it (needs a filename; never clobbers — the name is deduped).
+        $fn = basename(str_replace('\\', '/', (string)($body['file'] ?? '')));
+        if ($fn === '') out(['error' => 'chapter not found — pass file to create a new one'], 404);
+        $r = import_chapter_md($bookParam, $fn, (string)$body['markdown']);
+        if ($r['status'] !== 'ok') out(['error' => $r['msg']], 400);
+        log_activity($bookParam, 'chapter_create', $r['file']);
+        $cur = chapter_struct($bookParam, $r['id']);
+        unset($cur['body']);
+        out(['ok' => true, 'created' => true, 'chapter' => $cur]);
+    }
+    $base = (string)($body['base_hash'] ?? '');
+    if ($base === '')
+        out(['error' => 'base_hash is required to update an existing chapter — read it first (action=chapter) and pass its body_hash back',
+             'current_hash' => $c['body_hash']], 400);
+    $r = write_chapter_file($bookParam, (int)$c['id'], (string)$body['markdown'], $base);
+    if ($r['status'] === 'conflict') {
+        // The refusal carries everything needed to merge and retry (A3/B2 contract).
+        $cur = chapter_struct($bookParam, (int)$c['id']);
+        out(['error' => 'conflict', 'msg' => $r['msg'],
+             'current_hash' => $cur['body_hash'], 'current_body' => $cur['body']], 409);
+    }
+    if ($r['status'] !== 'ok') out(['error' => $r['msg']], 400);
+    log_activity($bookParam, 'chapter_save', $c['file']);
+    $cur = chapter_struct($bookParam, (int)$c['id']);
+    unset($cur['body']);
+    out(['ok' => true, 'msg' => $r['msg'], 'chapter' => $cur]);
+
+case 'chapter_create':  // POST {book, title, num?} — a titled empty chapter (ch-NN-title.md)
+    if (!$body || trim((string)($body['title'] ?? '')) === '') out(['error' => 'expected {book,title,num?}'], 400);
+    $bookParam = (string)($body['book'] ?? '');
+    if (!get_book($bookParam)) out(['error' => 'unknown book'], 400);
+    if (!$IS_SERVICE) require_cap($bookParam, 'edit');
+    $r = create_chapter($bookParam, (string)$body['title'], (string)($body['num'] ?? ''));
+    if ($r['status'] !== 'ok') out(['error' => $r['msg']], 400);
+    log_activity($bookParam, 'chapter_create', $r['file']);
+    $cur = chapter_struct($bookParam, $r['id']);
+    unset($cur['body']);
+    out(['ok' => true, 'chapter' => $cur]);
+
 case 'task_create':     // POST {book,title,body?,for_claude?,priority?}
     if (!$body || trim((string)($body['title'] ?? '')) === '') out(['error' => 'expected {book,title,...}'], 400);
     $bookParam = (string)($body['book'] ?? '');
@@ -191,5 +238,5 @@ case 'import':          // load a canonical snapshot — global op, admin/servic
     out(['ok' => true, 'books' => count($body['books'])]);
 
 default:
-    out(['error' => 'unknown action', 'actions' => ['ping','push','pull','chapter','entries','search','diagnostics','tasks','task_create','task_update','apply','writing-log','export','import']], 400);
+    out(['error' => 'unknown action', 'actions' => ['ping','push','pull','chapter','save_chapter','chapter_create','entries','search','diagnostics','tasks','task_create','task_update','apply','writing-log','export','import']], 400);
 }

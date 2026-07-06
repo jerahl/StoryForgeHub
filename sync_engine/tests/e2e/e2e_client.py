@@ -65,6 +65,28 @@ async def main():
         r = await s.call_tool("codex_list_entries", {"book": "echo"})
         check("entry list includes aria", "aria" in text_of(r))
 
+        # guarded chapter save (Track A3): read → save with hash → stale refused
+        ch = json.loads(text_of(await s.call_tool("codex_get_chapter", {"book": "echo", "file": "ch01.md"})))
+        r = json.loads(text_of(await s.call_tool("codex_save_chapter", {
+            "book": "echo", "filename": "ch01.md", "base_hash": ch["body_hash"],
+            "markdown": "# Chapter 1\n\nSnow fell on the watchtower, harder now."})))
+        check("guarded save with a fresh hash lands", r.get("ok") is True)
+        r = json.loads(text_of(await s.call_tool("codex_save_chapter", {
+            "book": "echo", "filename": "ch01.md", "base_hash": ch["body_hash"],
+            "markdown": "# Stale clobber"})))
+        check("stale hash is refused with merge context",
+              r.get("status") == "refused" and "harder now" in r.get("current_body", ""))
+        r = json.loads(text_of(await s.call_tool("codex_save_chapter", {
+            "book": "echo", "filename": "ch01.md", "markdown": "# Hashless clobber"})))
+        check("hashless update of an existing chapter is refused",
+              r.get("status") == "refused" and r.get("current_hash"))
+        r = json.loads(text_of(await s.call_tool("codex_save_chapter", {
+            "book": "echo", "filename": "ch-90-fresh.md", "markdown": "## Chapter 90 — Fresh\n\nNew prose."})))
+        check("creating a new chapter needs no hash", r.get("created") is True)
+        r = json.loads(text_of(await s.call_tool("codex_create_chapter", {"book": "echo", "title": "The Tower"})))
+        check("codex_create_chapter makes a titled chapter",
+              r.get("ok") is True and "the-tower" in r["chapter"]["file"])
+
     await with_token(SERVICE, as_service)
     await with_token(ALICE, as_alice)
 

@@ -33,19 +33,23 @@ the e2e suite below).
 
 ## Tools
 Reads: `codex_status`, `codex_search` (server-side, snippets), `codex_get_entry`,
-`codex_list_entries`, `codex_get_chapter` (**includes the Markdown body**),
-`codex_list_chapters`, `codex_get_diagnostics` (the Smart-editing analysis),
-`codex_get_tasks`.
-Writes: `codex_save_entry`, `codex_save_chapter`, `codex_push_files`,
+`codex_list_entries`, `codex_get_chapter` (**includes the Markdown body** and its
+`body_hash`), `codex_list_chapters`, `codex_get_diagnostics` (the Smart-editing
+analysis), `codex_get_tasks`.
+Writes: `codex_save_entry`, `codex_save_chapter` (**base-hash guarded**, Track A:
+creating needs no hash; updating requires the `body_hash` from `codex_get_chapter`,
+and a stale hash comes back as a refusal carrying `current_hash` + `current_body`
+to merge against — never a clobber), `codex_create_chapter`, `codex_push_files`,
 `codex_create_task`, `codex_update_task`, `codex_complete_task`,
-`codex_log_writing`. Every write flows through api.php, at the caller's role.
+`codex_log_writing`. Every write flows through api.php, at the caller's role, and
+records a revision with the caller's identity (A1).
 Admin: `codex_sync(dry_run)` — service token only; personal tokens are refused
-(it reconciles the whole books folder). Retires with the DB-canonical flip.
+(it reconciles the whole books folder). Retires with the A4 cutover.
 
-The granular reads/writes ride api.php's object-level actions
-(`chapter`, `entries`, `search`, `diagnostics`, `task_create`, `task_update`);
-only `codex_get_entry`/`codex_list_chapters`/`codex_status` still read via the
-`export` snapshot.
+The granular reads/writes ride api.php's object-level actions (`chapter`,
+`save_chapter`, `chapter_create`, `entries`, `search`, `diagnostics`,
+`task_create`, `task_update`); only `codex_get_entry`/`codex_list_chapters`/
+`codex_status` still read via the `export` snapshot.
 
 ### Pushing new files
 - `codex_save_entry(book, db, slug, markdown)` — a Codex entry.
@@ -117,6 +121,8 @@ log. Tokens are revocable per-user on the Account page; rotate the service
 - `codex_get_entry`/`codex_list_chapters`/`codex_status` still read the whole
   `export` snapshot — fine at this size; move them to granular actions if it
   grows.
-- With the DB-canonical flip (Track A), `codex_sync` and the folder-shaped
-  push semantics retire; `codex_save_chapter` moves onto a base-hash-guarded
-  `save_chapter` action.
+- The DB-canonical flip (Track A) is in: the app no longer needs
+  `CODEX_BOOKS_DIR`, `codex_save_chapter` rides the base-hash-guarded
+  `save_chapter` action, and every save records an attributed revision.
+  `codex_sync` + mirror mode survive only until the A4 cutover (runbook in
+  MASTER-PLAN-standalone A4).

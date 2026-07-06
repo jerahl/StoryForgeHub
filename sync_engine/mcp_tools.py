@@ -17,6 +17,7 @@ _MANUSCRIPT_RE = re.compile(r"^Manuscript/.+\.md$", re.IGNORECASE)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import codex_sync_lib as csl
+from api_client import ApiError
 
 
 class CodexTools:
@@ -176,16 +177,38 @@ class CodexTools:
         return self.push_files(book, {relpath: md})
 
     def save_chapter(self, book: str, filename: str, md: str,
-                     reconcile: bool = False) -> dict:
-        """Create/update a manuscript chapter from Markdown. `filename` is a bare
-        file name (e.g. 'ch-05-the-wall.md'); '.md' is appended if missing. Adding
-        a chapter never archives the others unless reconcile=True."""
+                     base_hash: str = "") -> dict:
+        """Create/update a manuscript chapter through the base-hash-guarded
+        api.php save_chapter action (A3). `filename` is a bare file name
+        (e.g. 'ch-05-the-wall.md'); '.md' is appended if missing.
+
+        Creating a new chapter needs no base_hash. UPDATING an existing one
+        requires the body_hash from codex_get_chapter — a stale or missing
+        hash is refused, and the refusal carries the CURRENT hash + body so
+        the caller can merge and retry instead of clobbering."""
         fn = os.path.basename(str(filename).replace("\\", "/").strip())
         if not fn:
             raise ValueError("filename is required")
         if not fn.lower().endswith(".md"):
             fn += ".md"
-        return self.push_files(book, {f"Manuscript/{fn}": md}, reconcile_chapters=reconcile)
+        payload = {"book": book, "file": fn, "markdown": md}
+        if base_hash:
+            payload["base_hash"] = base_hash
+        try:
+            return self.api.save_chapter(payload)
+        except ApiError as e:
+            # Refusals are data, not crashes: hand back everything api.php said
+            # (conflict msg, current_hash, current_body) so Claude can resolve.
+            out = {"status": "refused"}
+            out.update({k: v for k, v in (e.payload or {}).items() if k != "ok"})
+            out.setdefault("error", str(e))
+            return out
+
+    def create_chapter(self, book: str, title: str, num: str = "") -> dict:
+        title = (title or "").strip()
+        if not title:
+            raise ValueError("title is required")
+        return self.api.create_chapter({"book": book, "title": title, "num": num})
 
     # ---- sync (runs the reconcile cycle out-of-process) ----
     def sync(self, dry_run: bool = True, token: Optional[str] = None,

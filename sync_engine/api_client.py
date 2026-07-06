@@ -14,7 +14,12 @@ from typing import Any, Dict, List, Optional
 
 
 class ApiError(RuntimeError):
-    pass
+    """api.php returned an error. `payload` carries the full JSON error body
+    when there was one (e.g. a 409 conflict's current_hash/current_body), so
+    callers can hand Claude enough context to merge and retry."""
+    def __init__(self, msg: str, payload: Optional[dict] = None):
+        super().__init__(msg)
+        self.payload = payload or {}
 
 
 class CodexApi:
@@ -49,11 +54,11 @@ class CodexApi:
                 payload = json.loads(e.read().decode("utf-8"))
             except Exception:
                 payload = {"error": f"HTTP {e.code}"}
-            raise ApiError(f"{action}: {payload.get('error', e)}")
+            raise ApiError(f"{action}: {payload.get('error', e)}", payload if isinstance(payload, dict) else None)
         except Exception as e:  # noqa: BLE001
             raise ApiError(f"{action}: {e}")
         if isinstance(payload, dict) and payload.get("error"):
-            raise ApiError(f"{action}: {payload['error']}")
+            raise ApiError(f"{action}: {payload['error']}", payload)
         return payload
 
     # --- read ---
@@ -92,6 +97,14 @@ class CodexApi:
 
     def update_task(self, task: dict) -> dict:
         return self._call("task_update", body=task)
+
+    def save_chapter(self, payload: dict) -> dict:
+        """{book, id|file, markdown, base_hash?} — 409-style conflicts surface
+        as ApiError with .payload carrying current_hash/current_body."""
+        return self._call("save_chapter", body=payload)
+
+    def create_chapter(self, payload: dict) -> dict:
+        return self._call("chapter_create", body=payload)
 
     # --- write (single DB-writer path) ---
     def push(self, books: list) -> dict:

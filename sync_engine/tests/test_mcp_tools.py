@@ -2,6 +2,7 @@
 import os, sys, unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from api_client import ApiError   # noqa: E402
 from mcp_tools import CodexTools  # noqa: E402
 
 
@@ -16,6 +17,7 @@ class FakeApi:
         self.applied = []
         self.pushed = []
         self.calls = []
+        self.conflict = False
         self._export = {"books": [{"book": {"id": "b1", "folder": "book-one"},
                                    "entries": [E("aria", "Aria", body="captain"), E("bram", "Bram")],
                                    "chapters": [{"num": "01", "title": "The Wall", "status": "drafted",
@@ -40,6 +42,14 @@ class FakeApi:
         self.calls.append(("task_create", task)); return {"ok": True, "task": {"id": 9, **task}}
     def update_task(self, patch):
         self.calls.append(("task_update", patch)); return {"ok": True, "task": {"id": patch["id"]}}
+    def save_chapter(self, payload):
+        self.calls.append(("save_chapter", payload))
+        if self.conflict:
+            raise ApiError("save_chapter: conflict",
+                           {"error": "conflict", "current_hash": "abc123", "current_body": "# Newer"})
+        return {"ok": True, "chapter": {"id": 7, "body_hash": "def456"}}
+    def create_chapter(self, payload):
+        self.calls.append(("chapter_create", payload)); return {"ok": True, "chapter": {"id": 8, "file": "ch-03-x.md"}}
 
 
 class Tools(unittest.TestCase):
@@ -129,20 +139,32 @@ class Tools(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.t.save_entry("b1", "not-a-db", "x", "y")
 
-    def test_save_chapter_preserves_existing_chapters(self):
-        # Adding one chapter must NOT archive ch01/ch02: manuscript_present lists
-        # the new file plus every existing chapter.
-        self.t.save_chapter("b1", "ch-03-the-tower", "# Chapter 3")
-        book = self.api.pushed[-1][0]
-        self.assertEqual(book["folder"], "book-one")
-        self.assertIn("Manuscript/ch-03-the-tower.md", book["files"])  # .md appended
-        self.assertEqual(set(book["manuscript_present"]),
-                         {"ch01.md", "ch02.md", "ch-03-the-tower.md"})
+    def test_save_chapter_routes_to_guarded_action(self):
+        r = self.t.save_chapter("b1", "ch-03-the-tower", "# Chapter 3")
+        kind, payload = self.api.calls[-1]
+        self.assertEqual(kind, "save_chapter")
+        self.assertEqual(payload, {"book": "b1", "file": "ch-03-the-tower.md", "markdown": "# Chapter 3"})
+        self.assertTrue(r["ok"])
+        self.t.save_chapter("b1", "ch01.md", "# One v2", base_hash="aaa")
+        self.assertEqual(self.api.calls[-1][1]["base_hash"], "aaa")
+        with self.assertRaises(ValueError):
+            self.t.save_chapter("b1", "   ", "# x")
 
-    def test_save_chapter_reconcile_omits_guard(self):
-        # reconcile=True: caller opts into archive-on-push, no present list sent.
-        self.t.save_chapter("b1", "ch03.md", "# 3", reconcile=True)
-        self.assertNotIn("manuscript_present", self.api.pushed[-1][0])
+    def test_save_chapter_conflict_is_returned_as_data(self):
+        # A refused save must come back with the current hash + body, not raise.
+        self.api.conflict = True
+        r = self.t.save_chapter("b1", "ch01.md", "# Stale edit", base_hash="old")
+        self.assertEqual(r["status"], "refused")
+        self.assertEqual(r["error"], "conflict")
+        self.assertEqual(r["current_hash"], "abc123")
+        self.assertEqual(r["current_body"], "# Newer")
+
+    def test_create_chapter(self):
+        r = self.t.create_chapter("b1", " The Tower ", "3")
+        self.assertEqual(self.api.calls[-1], ("chapter_create", {"book": "b1", "title": "The Tower", "num": "3"}))
+        self.assertEqual(r["chapter"]["file"], "ch-03-x.md")
+        with self.assertRaises(ValueError):
+            self.t.create_chapter("b1", "  ")
 
     def test_push_files_multi(self):
         self.t.push_files("b1", {"Codex/Notes/outline.md": "# O",

@@ -127,11 +127,20 @@ def build_app(service_token: str, books_root: str, api_url: str, engine_dir: str
 
     @mcp.tool()
     def codex_save_chapter(book: str, filename: str, markdown: str,
-                           reconcile: bool = False) -> dict:
-        """Create/update a manuscript chapter from Markdown. filename is a bare
-        name (e.g. 'ch-05-the-wall.md'). Adding a chapter never archives the
-        others unless reconcile=True (which archives chapters absent from books)."""
-        return tools.save_chapter(book, filename, markdown, reconcile)
+                           base_hash: str = "") -> dict:
+        """Create/update a manuscript chapter. filename is a bare name (e.g.
+        'ch-05-the-wall.md'). Creating a new chapter needs no base_hash; to
+        UPDATE an existing one you must pass the body_hash you got from
+        codex_get_chapter — if the chapter moved meanwhile the save is refused
+        and the result carries the current hash + body so you can merge and
+        retry. Never save over prose you haven't read."""
+        return tools.save_chapter(book, filename, markdown, base_hash)
+
+    @mcp.tool()
+    def codex_create_chapter(book: str, title: str, num: str = "") -> dict:
+        """Create a new, empty titled chapter (ch-NN-title.md seeded with its
+        heading). num defaults to one past the highest existing chapter."""
+        return tools.create_chapter(book, title, num)
 
     @mcp.tool()
     def codex_push_files(book: str, files: dict, reconcile_chapters: bool = False) -> dict:

@@ -68,8 +68,9 @@ the app's Account page.
 | `codex_update_task(task_id, status?, result?, title?, body?)` | claim (`doing`), hand back (`todo`), or annotate a task |
 | `codex_complete_task(task_id, result="")` | mark a task done with a result note |
 | `codex_save_entry(book, db, slug, markdown)` | create/update an entry |
-| `codex_save_chapter(book, filename, markdown, reconcile=false)` | create/update a chapter; adding one never archives the others |
-| `codex_push_files(book, files, reconcile_chapters=false)` | push a map of relpath→Markdown (chapters, entries, notes, meta, sources) |
+| `codex_save_chapter(book, filename, markdown, base_hash="")` | create (no hash) or update (hash from `codex_get_chapter` required) a chapter; stale hash → refusal with `current_hash` + `current_body` to merge against |
+| `codex_create_chapter(book, title, num="")` | a titled empty chapter (`ch-NN-title.md`), numbered after the last |
+| `codex_push_files(book, files, reconcile_chapters=false)` | push a map of relpath→Markdown (entries, notes, meta, sources; bulk import) |
 | `codex_log_writing(book, words_added, total_words?, chapters?, minutes?, mood?, note?)` | append a writing-log row for today |
 
 Every write flows through the app's `api.php` (the single DB-writer path) under

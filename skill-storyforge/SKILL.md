@@ -46,8 +46,13 @@ not improvise another route.
    - Create/edit an entry: compose the markdown (reference.md shape; new
      entries start `seed`/`sketch`), then `codex_save_entry(book, db, slug, md)`.
      Honor the task's `target_db`/`target_slug` if set.
-   - Chapters: `codex_save_chapter(book, filename, markdown)` — adding a
-     chapter never archives the others (leave `reconcile` alone).
+   - Chapters: to EDIT existing prose, first `codex_get_chapter` (read it!),
+     then `codex_save_chapter(book, filename, markdown, base_hash=<body_hash
+     you just read>)`. A refused save means the chapter moved meanwhile — the
+     refusal carries the current hash + body; merge your change into THAT and
+     retry with the new hash. Creating a brand-new chapter needs no base_hash
+     (`codex_save_chapter` with a fresh filename, or `codex_create_chapter`
+     for a titled empty one). Never save over prose you haven't read.
 4. Finish with `codex_complete_task(task_id, result="one line on what changed")`.
    **Blocked / ambiguous:** do NOT mark it done — set it back with
    `codex_update_task(task_id, status="todo", result="what you need decided")`

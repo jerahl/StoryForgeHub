@@ -168,12 +168,15 @@ function save_entry($book_id, $db, $e) {
         foreach (($e['related'] ?? []) as $r)
             q("INSERT INTO entry_relations (entry_id,target_slug,sort_order) VALUES (?,?,?)", [$eid, $r, $i++]);
         $pdo->commit();
-        return $eid;
     } catch (Exception $ex) { $pdo->rollBack(); throw $ex; }
+    // A1: history for every door (web, MCP/API push, import) — after the commit
+    try { save_entry_revision($book_id, $db, $e['slug']); } catch (Exception $ex) {}
+    return $eid;
 }
 function delete_entry($book_id, $db, $slug) {
     $row = one("SELECT id FROM entries WHERE book_id=? AND db_key=? AND slug=?", [$book_id, $db, $slug]);
     if (!$row) return;
+    try { save_entry_revision($book_id, $db, $slug, 'delete'); } catch (Exception $ex) {}   // A1: recoverable
     $eid = $row['id'];
     foreach (['entry_fields','entry_sections','entry_relations'] as $t) q("DELETE FROM $t WHERE entry_id=?", [$eid]);
     q("DELETE FROM entries WHERE id=?", [$eid]);
@@ -249,49 +252,31 @@ function other_editor_names($chapter_id, $exclude_uid) {
     return array_map(function ($r) { return $r['display_name'] ?: ($r['email'] ?: 'Someone'); }, active_editors($chapter_id, $exclude_uid));
 }
 
-/** Phase 9 — write edited chapter prose back to the folder .md AND the DB.
- *  The ONLY place the app writes manuscript prose to disk. Implements the
- *  CONFLICT-not-overwrite rule: if the on-disk file differs from what the DB last
- *  synced (chapters.body), the folder changed since this edit was loaded, so we
- *  REFUSE and report a conflict instead of clobbering. Backs the file up first.
+/** Save edited chapter prose — the DB is canonical (standalone plan, A2).
+ *  Keeps the CONFLICT-not-overwrite rule from Phase 9/21: the edit page stamps
+ *  md5() of the body it loaded, and the save is REFUSED if chapters.body moved
+ *  underneath it (a co-author, the MCP, or — during the cutover window — the
+ *  sync). The writer's draft survives as an autosave (Phase 15) either way.
+ *  Mirror mode: while CODEX_BOOKS_DIR is still configured, the .md file is
+ *  also written best-effort AFTER the DB commit — a mirror failure never fails
+ *  the save. (The name is historical; disk is a projection now, not the truth.)
  *  Returns ['ok'|'conflict'|'error', 'msg'=>...]. */
 function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
-    $books = cfg()['books_dir'] ?? '';
-    if (!$books) return ['status'=>'error', 'msg'=>'Chapter editing is disabled (CODEX_BOOKS_DIR not set).'];
     $c = get_chapter($chapter_id);
     if (!$c || $c['book_id'] !== $book_id) return ['status'=>'error', 'msg'=>'Chapter not found.'];
-    $b = get_book($book_id);
-    if (!$b) return ['status'=>'error', 'msg'=>'Book not found.'];
-
-    $rel = ltrim(str_replace('\\', '/', (string)$c['file']), '/');
-    if ($rel === '' || strpos($rel, '..') !== false) return ['status'=>'error', 'msg'=>'Bad chapter path.'];
-    $path = book_root($b).'/Manuscript/'.$rel;
+    if (!get_book($book_id)) return ['status'=>'error', 'msg'=>'Book not found.'];
 
     $new_md = md_body_norm($new_md);
     $dbBody = md_body_norm($c['body']);
 
-    // Optimistic conflict check (Phase 9/21): the edit page stamps md5() of the
-    // body it loaded; refuse if the DB body changed underneath — whether from a
-    // sync OR a co-author saving first. Never clobber; the writer's draft is kept
-    // as an autosave (Phase 15) so nothing is lost.
     if ($base !== '' && $base !== md5($dbBody))
-        return ['status'=>'conflict', 'msg'=>'This chapter changed since you opened it — a sync or another editor saved first. Your draft is kept; re-open the chapter to see the current version and reapply your changes.'];
+        return ['status'=>'conflict', 'msg'=>'This chapter changed since you opened it — another editor (or Claude) saved first. Your draft is kept; re-open the chapter to see the current version and reapply your changes.'];
 
-    if (is_file($path)) {
-        $onDisk = md_body_norm(@file_get_contents($path));
-        if ($onDisk !== $dbBody)
-            return ['status'=>'conflict', 'msg'=>'The chapter file changed on disk since you opened it (an external edit or sync). Re-open the chapter and reapply your changes.'];
-        if ($onDisk === $new_md) {
-            discard_chapter_autosave($book_id, (int)$chapter_id);   // Phase 15: nothing changed, drop any stale draft
-            return ['status'=>'ok', 'msg'=>'No changes.'];
-        }
+    if ($dbBody === $new_md) {
+        discard_chapter_autosave($book_id, (int)$chapter_id);   // Phase 15: nothing changed, drop any stale draft
+        return ['status'=>'ok', 'msg'=>'No changes.'];
     }
 
-    // backup the current file before overwriting + write (shared with create/import)
-    $w = write_manuscript_bytes($path, $new_md);
-    if ($w['status'] !== 'ok') return $w;
-
-    // update the DB to match (so the next sync sees folder == DB → no clobber)
     $wc = md_word_count($new_md);
     q("UPDATE chapters SET body=?, word_count=?, words=? WHERE id=?", [$new_md, $wc, number_format($wc), (int)$chapter_id]);
     reconcile_scenes($book_id, (int)$chapter_id, $new_md);
@@ -299,14 +284,29 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     reconcile_citations($book_id);   // Phase 12: prose edit may add/remove [^cite:key] tokens
     save_chapter_snapshot($book_id, (int)$chapter_id, $c['file'], $new_md, 'save');  // Phase 15: recoverable history
     discard_chapter_autosave($book_id, (int)$chapter_id);                            // committed — drop the working draft
-    return ['status'=>'ok', 'msg'=>'Saved to the manuscript file and database.'];
+    mirror_chapter_file($book_id, $c['file'], $new_md);                              // A2: best-effort, after the commit
+    return ['status'=>'ok', 'msg'=>'Saved.'];
+}
+
+/** A2 transitional mirror: while CODEX_BOOKS_DIR is configured, project a saved
+ *  chapter body onto its .md file (backed up first by write_manuscript_bytes).
+ *  Best-effort by design — the DB commit already happened; a disk problem is
+ *  reported nowhere fatal. Deleted with the A4 cutover. */
+function mirror_chapter_file($book_id, $file, $md) {
+    if (!books_dir_set()) return;
+    $rel = ltrim(str_replace('\\', '/', (string)$file), '/');
+    if ($rel === '' || strpos($rel, '..') !== false) return;
+    $root = book_root($book_id);
+    if (!$root) return;
+    try { write_manuscript_bytes($root.'/Manuscript/'.$rel, $md); } catch (Exception $e) {}
 }
 
 /* ------------------------------------------ create / import (shared plumbing) */
-/** True when the Markdown-canonical create/import features are available. Gated on
- *  CODEX_BOOKS_DIR exactly like chapter editing (Phase 9): if the books root isn't
- *  configured, the app can't write the .md/folder that must exist before the DB
- *  projection, so New/Import are disabled. */
+/** True when the transitional MIRROR MODE is on (standalone plan, A2): the DB is
+ *  canonical everywhere, but while CODEX_BOOKS_DIR is still configured every
+ *  chapter/book write is also projected onto the .md folders (best-effort) so
+ *  the old folder stays warm through the cutover window. Nothing is gated on
+ *  this any more; it disappears with the A4 cutover. */
 function books_dir_set() { return (cfg()['books_dir'] ?? '') !== ''; }
 
 /** On-disk root for a single book, resolved from the book row (Phase 18). One
@@ -330,12 +330,13 @@ function slugify_folder($s) {
 }
 
 /** Resolve + safety-check an absolute path inside a book's Manuscript/ folder.
- *  $rel is a path relative to Manuscript/. Returns [absolute_path, error]. */
+ *  $rel is a path relative to Manuscript/. Returns [absolute_path, error]; with
+ *  mirror mode off the path is null and that is NOT an error — there is simply
+ *  no disk to touch (A2). */
 function manuscript_path($book, $rel) {
-    $books = cfg()['books_dir'] ?? '';
-    if (!$books) return [null, 'Chapter files are disabled (CODEX_BOOKS_DIR not set).'];
     $rel = ltrim(str_replace('\\', '/', (string)$rel), '/');
     if (strpos($rel, '..') !== false) return [null, 'Bad chapter path.'];
+    if (!books_dir_set()) return [null, null];
     return [book_root($book).'/Manuscript/'.$rel, null];
 }
 
@@ -357,15 +358,16 @@ function write_manuscript_bytes($path, $md) {
     return ['status'=>'ok', 'msg'=>'Wrote '.basename($path).'.'];
 }
 
-/** A Manuscript/ filename that collides with neither an on-disk file nor a DB row.
- *  $base is a slug with no extension; appends -2, -3… until free. */
+/** A Manuscript/ filename that collides with neither a DB row nor (in mirror
+ *  mode) an on-disk file. $base is a slug with no extension; appends -2, -3…
+ *  until free. */
 function unique_manuscript_file($book, $base) {
     $base = $base !== '' ? $base : 'chapter';
     $cand = $base.'.md'; $n = 2;
     while (true) {
-        [$path, $err] = manuscript_path($book, $cand);
+        [$path, ] = manuscript_path($book, $cand);
         $inDb = val("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book['id'], $cand]);
-        if (($err !== null || !is_file($path)) && !$inDb) return $cand;
+        if (!$inDb && ($path === null || !is_file($path))) return $cand;
         $cand = $base.'-'.$n.'.md'; $n++;
     }
 }
@@ -387,12 +389,12 @@ function unique_book_folder($base) {
     return $folder;
 }
 
-/** Function 1 — New chapter. Seeds Manuscript/<slug>.md with a heading, reflects it
- *  into the DB via upsert_chapter_from_md(), and optionally assigns it to an act.
- *  Never clobbers: refuses if the derived file already exists. Folder-first.
+/** Function 1 — New chapter. Inserts the chapter (DB-canonical, A2) via
+ *  upsert_chapter_from_md(), optionally assigns it to an act, and mirrors the
+ *  .md file when mirror mode is on. Never clobbers: the derived filename is
+ *  deduped against the DB (and the disk, in mirror mode).
  *  Returns ['status','msg','id'?,'file'?]. */
 function create_chapter($book_id, $title, $num = '', $act_id = '') {
-    if (!books_dir_set()) return ['status'=>'error', 'msg'=>'Creating chapters is disabled (CODEX_BOOKS_DIR not set).'];
     $b = get_book($book_id);
     if (!$b) return ['status'=>'error', 'msg'=>'Book not found.'];
     $title = trim((string)$title);
@@ -406,30 +408,26 @@ function create_chapter($book_id, $title, $num = '', $act_id = '') {
     $numeric = preg_match('/^\d+$/', $num);
     $numPad = $numeric ? str_pad($num, 2, '0', STR_PAD_LEFT) : '';
 
-    // Match the book's ch-NN-title.md convention; dedupe against disk + DB.
+    // Match the book's ch-NN-title.md convention; dedupe against DB (+ disk in mirror mode).
     $base = ($numPad !== '' ? 'ch-'.$numPad.'-' : '').slugify_folder($title);
     $file = unique_manuscript_file($b, rtrim($base, '-'));
-    [$path, $err] = manuscript_path($b, $file);
-    if ($err) return ['status'=>'error', 'msg'=>$err];
-    if (is_file($path)) return ['status'=>'error', 'msg'=>'A file named '.$file.' already exists — refusing to overwrite.'];
 
     $heading = '## Chapter '.($numeric ? (string)(int)$num : $num).' — '.$title;
     $md = $heading."\n\n";
-    $w = write_manuscript_bytes($path, $md);
-    if ($w['status'] !== 'ok') return $w;
-
     upsert_chapter_from_md($book_id, $file, $md);
     $row = one("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book_id, $file]);
     $cid = $row ? (int)$row['id'] : 0;
+    if ($cid) save_chapter_snapshot($book_id, $cid, $file, $md, 'save');
     if ($cid && $act_id !== '' && $act_id !== null) set_chapter_act($cid, $book_id, $act_id);
+    mirror_chapter_file($book_id, $file, $md);
     return ['status'=>'ok', 'msg'=>'Created chapter “'.$title.'”.', 'id'=>$cid, 'file'=>$file];
 }
 
 /** Function 3a — import one chapter from Markdown (paste or a single .md upload).
- *  Thin wrapper over the shared writer: sanitize the filename, never clobber
- *  (dedupe), write to Manuscript/, then upsert. Returns ['status','msg','id'?,'file'?]. */
+ *  Sanitize the filename, never clobber (dedupe against the DB), upsert into the
+ *  DB (canonical, A2), then mirror the file when mirror mode is on.
+ *  Returns ['status','msg','id'?,'file'?]. */
 function import_chapter_md($book_id, $filename, $content) {
-    if (!books_dir_set()) return ['status'=>'error', 'msg'=>'Importing is disabled (CODEX_BOOKS_DIR not set).'];
     $b = get_book($book_id);
     if (!$b) return ['status'=>'error', 'msg'=>'Book not found.'];
     $content = str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], (string)$content);
@@ -444,22 +442,20 @@ function import_chapter_md($book_id, $filename, $content) {
         if ($base === '') $base = 'imported-chapter';
     }
     $file = unique_manuscript_file($b, $base);
-    [$path, $err] = manuscript_path($b, $file);
-    if ($err) return ['status'=>'error', 'msg'=>$err];
 
-    $w = write_manuscript_bytes($path, $content);
-    if ($w['status'] !== 'ok') return $w;
     upsert_chapter_from_md($book_id, $file, $content);
     $row = one("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book_id, $file]);
+    if ($row) save_chapter_snapshot($book_id, (int)$row['id'], $file, $content, 'save');
+    mirror_chapter_file($book_id, $file, $content);
     return ['status'=>'ok', 'msg'=>'Imported '.$file.'.', 'id'=>$row ? (int)$row['id'] : 0, 'file'=>$file];
 }
 
-/** Function 2 — New book. Derives a unique id + folder from the title, creates the
- *  folder skeleton on disk (Manuscript/ + Codex/<each profile db>/ + Codex/Meta/),
- *  then writes the book row via save_book() with the chosen profile. Folder-first.
+/** Function 2 — New book. Derives a unique id + folder name from the title and
+ *  writes the book row via save_book() with the chosen profile (DB-canonical,
+ *  A2). In mirror mode the folder skeleton (Manuscript/ + Codex/<each profile
+ *  db>/ + Codex/Meta/) is also created on disk, best-effort.
  *  Returns ['status','msg','id'?]. */
 function create_book($f) {
-    if (!books_dir_set()) return ['status'=>'error', 'msg'=>'Creating books is disabled (CODEX_BOOKS_DIR not set).'];
     $books = cfg()['books_dir'] ?? '';
     $title = trim((string)($f['title'] ?? ''));
     if ($title === '') return ['status'=>'error', 'msg'=>'Give the book a title.'];
@@ -468,17 +464,16 @@ function create_book($f) {
     $slug   = slugify_folder($title) ?: 'book';
     $folder = unique_book_folder($slug);
     $id     = unique_book_id($slug);
-    $root   = rtrim($books, '/').'/'.$folder;
-    if (is_dir($root)) return ['status'=>'error', 'msg'=>'A folder named '.$folder.' already exists.'];
 
-    @mkdir($root.'/Manuscript', 0775, true);
-    foreach (dbmeta_for($profile) as $meta) {
-        $fdr = $meta['folder'] ?? '';
-        if ($fdr !== '') @mkdir($root.'/Codex/'.$fdr, 0775, true);
+    if (books_dir_set()) {   // mirror: lay the folder skeleton, best-effort
+        $root = rtrim($books, '/').'/'.$folder;
+        @mkdir($root.'/Manuscript', 0775, true);
+        foreach (dbmeta_for($profile) as $meta) {
+            $fdr = $meta['folder'] ?? '';
+            if ($fdr !== '') @mkdir($root.'/Codex/'.$fdr, 0775, true);
+        }
+        @mkdir($root.'/Codex/Meta', 0775, true);
     }
-    @mkdir($root.'/Codex/Meta', 0775, true);
-    if (!is_dir($root.'/Manuscript'))
-        return ['status'=>'error', 'msg'=>'Could not create the book folder under '.$books.' (check write permission).'];
 
     save_book([
         'id'=>$id, 'folder'=>$folder, 'title'=>$title,
@@ -494,12 +489,13 @@ function create_book($f) {
     return ['status'=>'ok', 'msg'=>'Created book “'.$title.'”.', 'id'=>$id];
 }
 
-/** Function 3b — import a zipped book folder. Unzips into a fresh (deduped) folder
- *  under books_dir with zip-slip + size guards, then reflects the .md into the DB
- *  via push_files() — no new parse logic. The zip may wrap the book in a single top
- *  folder (stripped) or hold Codex//Manuscript at its root. Returns ['status','msg','id'?,'report'?]. */
+/** Function 3b — import a zipped book folder. Reads the .md payload straight out
+ *  of the archive (zip-slip + size guards) and loads it into the DB via
+ *  push_files() — no new parse logic, no disk required (A2). In mirror mode the
+ *  whole archive is also extracted into a fresh (deduped) folder under books_dir.
+ *  The zip may wrap the book in a single top folder (stripped) or hold
+ *  Codex//Manuscript at its root. Returns ['status','msg','id'?,'report'?]. */
 function import_book_zip($zip_path, $opts = []) {
-    if (!books_dir_set()) return ['status'=>'error', 'msg'=>'Importing is disabled (CODEX_BOOKS_DIR not set).'];
     if (!class_exists('ZipArchive')) return ['status'=>'error', 'msg'=>'ZIP support (php-zip) is not available on this server.'];
     $books = cfg()['books_dir'] ?? '';
 
@@ -548,22 +544,28 @@ function import_book_zip($zip_path, $opts = []) {
 
     $title   = trim((string)($opts['title'] ?? '')) ?: ucwords(str_replace('-', ' ', $prefix ?: 'imported book'));
     $slug    = slugify_folder($opts['folder'] ?? ($prefix ?: $title)) ?: 'book';
-    $folder  = unique_book_folder($slug);   // never write into an existing book's folder
+    $folder  = unique_book_folder($slug);   // never reuse an existing book's folder name
     $id      = unique_book_id($slug);
-    $root    = rtrim($books, '/').'/'.$folder;
-    @mkdir($root, 0775, true);
-    if (!is_dir($root)) { $za->close(); return ['status'=>'error', 'msg'=>'Could not create '.$root.' (check write permission).']; }
 
-    // Extract to disk (folder is canonical) and gather the .md payload for the DB.
+    $mirror = books_dir_set();
+    $root   = $mirror ? rtrim($books, '/').'/'.$folder : null;
+    if ($mirror) @mkdir($root, 0775, true);
+
+    // Gather the .md payload for the DB straight from the archive; extract the
+    // full tree to disk only when the mirror is on.
     $payload = []; $present = [];
     foreach ($rels as $rel => $idx) {
+        $isMd = preg_match('#^(Codex|Manuscript)/#', $rel) && preg_match('/\.md$/i', $rel);
+        if (!$isMd && !$mirror) continue;               // non-.md files only matter on disk
         $data = $za->getFromIndex($idx);
         if ($data === false) continue;
-        $abs = $root.'/'.$rel;
-        $dir = dirname($abs);
-        if (!is_dir($dir)) @mkdir($dir, 0775, true);
-        @file_put_contents($abs, $data);
-        if (preg_match('#^(Codex|Manuscript)/#', $rel) && preg_match('/\.md$/i', $rel)) {
+        if ($mirror && is_dir($root)) {
+            $abs = $root.'/'.$rel;
+            $dir = dirname($abs);
+            if (!is_dir($dir)) @mkdir($dir, 0775, true);
+            @file_put_contents($abs, $data);
+        }
+        if ($isMd) {
             $payload[$rel] = str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], $data);
             if (preg_match('#^Manuscript/(.+\.md)$#i', $rel, $mm)) $present[] = basename($mm[1]);
         }
@@ -1165,7 +1167,13 @@ function ensure_chapter_revisions() {
         body MEDIUMTEXT, body_hash VARCHAR(40) DEFAULT '', word_count INT DEFAULT 0,
         kind VARCHAR(10) DEFAULT 'save', created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
     try { db()->exec("CREATE INDEX k_rev_ch ON chapter_revisions (book_id, chapter_id)"); } catch (Exception $e) {}
+    // A1: who saved it, through which door (web|api|cli) — lazy ALTERs for old installs
+    try { db()->exec("ALTER TABLE chapter_revisions ADD COLUMN saved_by INT DEFAULT NULL"); } catch (Exception $e) {}
+    try { db()->exec("ALTER TABLE chapter_revisions ADD COLUMN saved_via VARCHAR(10) DEFAULT ''"); } catch (Exception $e) {}
 }
+/** The door this request came through, for revision attribution (A1):
+ *  'web' (default), 'api' (api.php stamps it), or 'cli' (bin/* stamp it). */
+function save_via() { return (string)($GLOBALS['__save_via'] ?? 'web'); }
 /** How many 'save' snapshots to retain per chapter. */
 const CHAPTER_REVISION_KEEP = 20;
 
@@ -1179,8 +1187,9 @@ function save_chapter_snapshot($book_id, $chapter_id, $file, $body, $kind = 'sav
     $last = one("SELECT body_hash FROM chapter_revisions WHERE book_id=? AND chapter_id=? AND kind='save' ORDER BY id DESC LIMIT 1",
         [$book_id, (int)$chapter_id]);
     if ($kind === 'save' && $last && $last['body_hash'] === $hash) return;
-    q("INSERT INTO chapter_revisions (book_id, chapter_id, chapter_file, body, body_hash, word_count, kind) VALUES (?,?,?,?,?,?,?)",
-        [$book_id, (int)$chapter_id, (string)$file, $body, $hash, md_word_count($body), $kind]);
+    $uid = function_exists('current_user_id') ? current_user_id() : null;
+    q("INSERT INTO chapter_revisions (book_id, chapter_id, chapter_file, body, body_hash, word_count, kind, saved_by, saved_via) VALUES (?,?,?,?,?,?,?,?,?)",
+        [$book_id, (int)$chapter_id, (string)$file, $body, $hash, md_word_count($body), $kind, $uid, save_via()]);
     // prune old 'save' snapshots, newest KEEP survive
     $keepIds = array_map(function ($r) { return (int)$r['id']; },
         all("SELECT id FROM chapter_revisions WHERE book_id=? AND chapter_id=? AND kind='save' ORDER BY id DESC LIMIT " . (int)CHAPTER_REVISION_KEEP,
@@ -1216,6 +1225,56 @@ function get_chapter_revisions($book_id, $chapter_id, $limit = 25) {
 function get_chapter_revision($book_id, $id) {
     ensure_chapter_revisions();
     return one("SELECT * FROM chapter_revisions WHERE book_id=? AND id=?", [$book_id, (int)$id]);
+}
+
+/* -------------------------------------------- entry revisions (A1)
+ * The entry-side twin of chapter_revisions: every save through any door (web
+ * form, MCP/API push, import) records the entry's full rendered Markdown, so
+ * the folder's git history stops being the only undo. Deduped by hash,
+ * pruned to the newest ENTRY_REVISION_KEEP per entry; a delete records one
+ * final revision first so nothing is ever silently lost. */
+const ENTRY_REVISION_KEEP = 20;
+function ensure_entry_revisions() {
+    static $done = false; if ($done) return; $done = true;
+    $pk = is_sqlite() ? 'INTEGER PRIMARY KEY AUTOINCREMENT' : 'INT AUTO_INCREMENT PRIMARY KEY';
+    try { db()->exec("CREATE TABLE IF NOT EXISTS entry_revisions (
+        id $pk, book_id VARCHAR(40) NOT NULL, db_key VARCHAR(20) NOT NULL, slug VARCHAR(160) NOT NULL,
+        name VARCHAR(255) DEFAULT '', body MEDIUMTEXT, body_hash VARCHAR(40) DEFAULT '',
+        kind VARCHAR(10) DEFAULT 'save', saved_by INT DEFAULT NULL, saved_via VARCHAR(10) DEFAULT '',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP )"); } catch (Exception $e) {}
+    try { db()->exec("CREATE INDEX k_erev ON entry_revisions (book_id, db_key, slug)"); } catch (Exception $e) {}
+}
+/** Record the entry's CURRENT state (rendered Markdown) as a revision. Call
+ *  after a successful save (kind='save') or just before a delete (kind='delete'). */
+function save_entry_revision($book_id, $db, $slug, $kind = 'save') {
+    ensure_entry_revisions();
+    $e = get_entry($book_id, $db, $slug);
+    if (!$e) return;
+    $md = md_render_entry($e);
+    $hash = md5($md);
+    $last = one("SELECT body_hash FROM entry_revisions WHERE book_id=? AND db_key=? AND slug=? ORDER BY id DESC LIMIT 1",
+        [$book_id, $db, $slug]);
+    if ($kind === 'save' && $last && $last['body_hash'] === $hash) return;
+    $uid = function_exists('current_user_id') ? current_user_id() : null;
+    q("INSERT INTO entry_revisions (book_id, db_key, slug, name, body, body_hash, kind, saved_by, saved_via) VALUES (?,?,?,?,?,?,?,?,?)",
+        [$book_id, $db, $slug, (string)($e['name'] ?? ''), $md, $hash, $kind, $uid, save_via()]);
+    $keepIds = array_map(function ($r) { return (int)$r['id']; },
+        all("SELECT id FROM entry_revisions WHERE book_id=? AND db_key=? AND slug=? ORDER BY id DESC LIMIT " . (int)ENTRY_REVISION_KEEP,
+            [$book_id, $db, $slug]));
+    if ($keepIds)
+        q("DELETE FROM entry_revisions WHERE book_id=? AND db_key=? AND slug=? AND id NOT IN (" . implode(',', $keepIds) . ")",
+            [$book_id, $db, $slug]);
+}
+function get_entry_revisions($book_id, $db, $slug, $limit = 25) {
+    ensure_entry_revisions();
+    return all("SELECT r.id, r.name, r.body_hash, r.kind, r.saved_via, r.created_at, u.display_name AS saved_by_name
+                  FROM entry_revisions r LEFT JOIN users u ON u.id = r.saved_by
+                 WHERE r.book_id=? AND r.db_key=? AND r.slug=? ORDER BY r.id DESC LIMIT " . (int)$limit,
+        [$book_id, $db, $slug]);
+}
+function get_entry_revision($book_id, $id) {
+    ensure_entry_revisions();
+    return one("SELECT * FROM entry_revisions WHERE book_id=? AND id=?", [$book_id, (int)$id]);
 }
 
 /* ----------------------------------------------------------- sync_state */

@@ -138,6 +138,19 @@ Before removing the folder's git history, replace it:
 
 **Contract impact:** none. **Effort:** ~1 session.
 
+**Status (2026-07-06): DONE** (adjusted to what Phase 15 had already built —
+`chapter_revisions` + autosave + a history panel existed for chapters). Added:
+`saved_by`/`saved_via` attribution on chapter revisions (web|api|cli door stamped
+by each entrypoint), a new `entry_revisions` table hooked into `save_entry` (every
+door: web form, MCP/API push, import; deduped by hash, keep-20) with a **History**
+panel + restore on the entry page (restore = a new save on top, never a rewind) and
+a final `delete`-kind revision before any entry delete. `bin/export.php` renders
+every book to canonical Markdown folders (entries/chapters/notes/meta/progressions/
+sources + `book.json`), layout matching what `push_files()` parses so an export
+re-imports cleanly; `deploy/backup.sh` now tars a nightly export next to the
+mysqldump (the folder tar remains only while mirror mode lasts). Gates:
+`tests/php/db_canonical_test.php`.
+
 ### A2 — Un-gate the app from `CODEX_BOOKS_DIR`
 
 Make the app fully functional with no books directory configured:
@@ -157,6 +170,16 @@ Make the app fully functional with no books directory configured:
 
 **Contract impact:** yes — the app becomes the writer of record. This is the flip.
 **Effort:** ~1 session (the Phase 21 conflict machinery already exists).
+
+**Status (2026-07-06): DONE.** `write_chapter_file()` is DB-first: base-hash check
+against `chapters.body` only (the on-disk-drift branch is gone), save = one DB
+update + reconciles + attributed revision, then a best-effort mirror write when
+`CODEX_BOOKS_DIR` is still set (`mirror_chapter_file()`, deleted at A4).
+`create_chapter`, `import_chapter_md`, `create_book`, and `import_book_zip` all
+work with no books directory (the zip import reads its payload straight from the
+archive); the New book / New chapter / Import UI is un-gated. Fixture-proved in
+`tests/php/db_canonical_test.php`: create/save/conflict/no-op with no books dir,
+plus mirror-mode projection in a subprocess.
 
 ### A3 — Granular REST for everything the MCP needs
 
@@ -185,6 +208,16 @@ entries/chapters/notes with snippets, LIKE-escaped, archived chapters excluded),
 full A3: `save_chapter`/`create_chapter` with the base-hash rule (wants A2),
 entry CRUD actions, scenes/acts/plot-board/threads/sources, and pagination.
 
+**Status update (2026-07-06, with A2): the chapter write is DONE.** `save_chapter`
+(create with a deduped filename needs no hash; updating an existing chapter
+REQUIRES `base_hash`, and a stale/missing hash returns 400/409 carrying
+`current_hash` + `current_body` — the refusal-with-merge-context contract) and
+`chapter_create` (titled empty chapter). `codex_save_chapter` now rides them
+(`base_hash` param; refusals returned as data, not errors) and
+`codex_create_chapter` is new; e2e drives read → guarded save → stale refusal →
+hashless refusal → create. Still open, non-blocking: entry CRUD actions,
+scenes/acts/plot-board/threads/sources, pagination.
+
 ### A4 — Cutover and demolition
 
 1. Run **mirror mode + parallel timer** for a week or two of real use; confirm the
@@ -200,6 +233,34 @@ entry CRUD actions, scenes/acts/plot-board/threads/sources, and pagination.
 
 **Rollback:** re-enable the timer + mirror mode; the folder was kept warm the whole
 window. **Effort:** ~0.5 session plus the observation window.
+
+**Status (2026-07-06): code ready; the cutover itself is an ops step on the box.**
+Everything A4 needs is shipped — mirror mode is live whenever `CODEX_BOOKS_DIR`
+is set, the nightly backup already tars a DB export next to the folder tar, and
+nothing in the app requires the folder. Runbook for the day-of:
+
+1. **Parallel-run window (1–2 weeks):** leave `CODEX_BOOKS_DIR` set and
+   `codex-sync.timer` running. Watch `sync.log` — the reconcile should report
+   *nothing to do* except changes made directly in the folder (which should be
+   nobody, now that all editing is in-app/MCP). Any push/pull it performs is a
+   red flag to investigate before proceeding.
+2. **Freeze + final archive:** `systemctl disable --now codex-sync.timer`, then
+   `php bin/export.php --dir /srv/codex/books-final && cd /srv/codex/books-final
+   && git init && git add -A && git commit -m 'codex-folder-final' && git tag
+   codex-folder-final` (or export over the existing books checkout and tag there).
+   Confirm a restore: unzip the latest `export-*.tar.gz` and spot-check a chapter.
+3. **Flip the config:** remove `CODEX_BOOKS_DIR` from `/etc/codex/codex.env` and
+   the `codex-mcp.service` unit; `systemctl daemon-reload && systemctl restart
+   php8.3-fpm codex-mcp`. Mirror mode is now off; saves are DB-only.
+4. **Verify:** edit a chapter in the app and over MCP (stale-hash refusal
+   included), check revisions record, run `bin/export.php` once by hand.
+5. **Demolition (separate commit):** delete `codex_sync` from the MCP surface,
+   `mirror_chapter_file()` + mirror branches, `sync_engine/reconcile.py`,
+   `cycle.py`, `engine.py` (+ their units/timers from `deploy/`), and the
+   `push`/`pull` api.php actions once nothing calls them. `codex_sync_lib.py`
+   stays (import/export parsing). Mark `MCP-SYNC-PLAN-2026-06-27.md` historical.
+6. README rewrite: installation = PHP + MariaDB + env file; folders appear only
+   under Backups and Import/Export.
 
 ---
 
