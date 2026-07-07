@@ -50,8 +50,7 @@ fi
 : "${CODEX_ADMIN_USER:=codex}"                 # non-root sudo user to create/use
 : "${CODEX_APP_ROOT:=/srv/codex/app}"          # app root (internals: src/, config.php, schema.sql, bin/, sync/)
 : "${CODEX_DOCROOT:=${CODEX_APP_ROOT}/htdocs}" # web docroot — ONLY web-exposed files live here
-: "${CODEX_BOOKS_DIR:=/srv/codex/books}"       # canonical Markdown book folders
-: "${CODEX_ENGINE_DIR:=${CODEX_APP_ROOT}/sync_engine}"  # where the Python reconcile engine lives (cycle.py)
+: "${CODEX_ENGINE_DIR:=${CODEX_APP_ROOT}/sync_engine}"  # where the MCP service lives
 : "${CODEX_ENV_FILE:=/etc/codex/codex.env}"    # runtime secrets (php-fpm + mcp)
 : "${CODEX_DB_NAME:=codex}"
 : "${CODEX_DB_USER:=codex}"
@@ -59,10 +58,9 @@ fi
 : "${PHP_FPM_POOL:=/etc/php/${PHP_VERSION}/fpm/pool.d/codex.conf}"
 : "${WEB_SERVER:=caddy}"                        # caddy | nginx
 : "${BACKUP_DIR:=/var/backups/codex}"
-: "${SYNC_INTERVAL_MIN:=5}"                     # codex-sync.timer cadence (minutes)
 
 export DEPLOY_DIR REPO_DIR CODEX_DOMAIN CODEX_ADMIN_USER CODEX_APP_ROOT CODEX_DOCROOT \
-       CODEX_BOOKS_DIR CODEX_ENGINE_DIR CODEX_ENV_FILE CODEX_DB_NAME CODEX_DB_USER PHP_VERSION \
-       PHP_FPM_POOL WEB_SERVER BACKUP_DIR SYNC_INTERVAL_MIN
+       CODEX_ENGINE_DIR CODEX_ENV_FILE CODEX_DB_NAME CODEX_DB_USER PHP_VERSION \
+       PHP_FPM_POOL WEB_SERVER BACKUP_DIR
 
 rand_secret() { head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 48; }

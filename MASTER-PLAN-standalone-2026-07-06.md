@@ -234,10 +234,34 @@ scenes/acts/plot-board/threads/sources, pagination.
 **Rollback:** re-enable the timer + mirror mode; the folder was kept warm the whole
 window. **Effort:** ~0.5 session plus the observation window.
 
-**Status (2026-07-06): code ready; the cutover itself is an ops step on the box.**
-Everything A4 needs is shipped — mirror mode is live whenever `CODEX_BOOKS_DIR`
-is set, the nightly backup already tars a DB export next to the folder tar, and
-nothing in the app requires the folder. Runbook for the day-of:
+**Status (2026-07-06): demolition DONE — steps 1–4 below are the remaining ops
+pass on the box.** The demolition commit removed: the reconcile engine
+(`reconcile.py`, `engine.py`, `cycle.py` + their tests and the
+`codex-sync.service/timer` units — `04-configure.sh` now also cleans them off
+an older box), the `codex_sync` MCP tool, mirror mode
+(`mirror_chapter_file()` and every disk branch in create/import/save),
+`books_dir` from config and all deploy scripts (the php-fpm pool, the units,
+`setup.sh`), the orphaned `pull` api action + `pull_files()`, and a leftover
+`books_dir` gate that still hid the chapter **Edit prose** button (now
+role-gated). `push` stays as the bulk-Markdown write verb (zip import, MCP
+`codex_push_files`/`codex_save_entry`). `codex_sync_lib.py` stays as the
+dialect parse/render library. `MCP-SYNC-PLAN-2026-06-27.md` is marked
+historical. Because the code no longer knows about folders, the ops runbook
+simplifies to:
+
+1. **Final archive:** `php bin/export.php --dir /srv/codex/books-final` then
+   git-tag it (`codex-folder-final`) or keep the tarball the nightly backup
+   already makes. Test a restore (unzip + spot-check a chapter).
+2. **Stop the timer** if it is still running: `systemctl disable --now
+   codex-sync.timer` (redeploying with `04-configure.sh` does this for you and
+   removes the units).
+3. **Deploy this code** (`03-setup-app.sh` + `04-configure.sh`), remove
+   `CODEX_BOOKS_DIR` from `/etc/codex/codex.env`, restart `php8.3-fpm` and
+   `codex-mcp`.
+4. **Verify:** edit a chapter in the app and over MCP (stale-hash refusal
+   included), check revisions record, run `sudo ./deploy/backup.sh` once.
+
+Original day-of plan (kept for context):
 
 1. **Parallel-run window (1–2 weeks):** leave `CODEX_BOOKS_DIR` set and
    `codex-sync.timer` running. Watch `sync.log` — the reconcile should report

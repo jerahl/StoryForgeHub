@@ -11,7 +11,6 @@ Type=simple
 User=${CODEX_ADMIN_USER}
 Group=www-data
 EnvironmentFile=${CODEX_ENV_FILE}
-Environment=CODEX_BOOKS_DIR=${CODEX_BOOKS_DIR}
 Environment=CODEX_API_URL=http://127.0.0.1:8081/api.php
 # Enables the OAuth discovery pointer on 401s (Track B3).
 Environment=CODEX_PUBLIC_URL=https://${CODEX_DOMAIN}
@@ -24,7 +23,6 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 StateDirectory=codex
-ReadWritePaths=${CODEX_BOOKS_DIR}
 
 [Install]
 WantedBy=multi-user.target

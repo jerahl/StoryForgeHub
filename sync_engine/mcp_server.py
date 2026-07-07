@@ -17,7 +17,7 @@ inside the HTTP request that carried it and the caller's token rides a
 contextvar from the auth middleware into the api client.
 
 Run (under the venv python, by the codex-mcp systemd unit):
-    API_KEY=... CODEX_BOOKS_DIR=/srv/codex/books python -m sync_engine.mcp_server
+    API_KEY=... python -m sync_engine.mcp_server
 """
 from __future__ import annotations
 import contextvars
@@ -74,12 +74,11 @@ class TokenAuthMiddleware:
             CURRENT_TOKEN.reset(ctx)
 
 
-def build_app(service_token: str, books_root: str, api_url: str, engine_dir: str | None = None,
-              public_url: str = ""):
+def build_app(service_token: str, api_url: str, public_url: str = ""):
     """Build the Starlette ASGI app: stateless FastMCP + per-user token gate.
     `public_url` (e.g. https://<domain>) enables the OAuth discovery pointer on 401s."""
     api = CodexApi(api_url, lambda: CURRENT_TOKEN.get())
-    tools = CodexTools(api, books_root, engine_dir)
+    tools = CodexTools(api)
 
     def validate(candidate: str) -> bool:
         try:
@@ -193,16 +192,6 @@ def build_app(service_token: str, books_root: str, api_url: str, engine_dir: str
         """Append a writing-log row for today."""
         return tools.log_writing(book, words_added, total_words, chapters, minutes, mood, note)
 
-    @mcp.tool()
-    def codex_sync(dry_run: bool = True) -> str:
-        """Run one folder<->DB reconcile cycle (admin: service token only).
-        dry_run=True reports without writing. Retires with the DB-canonical flip."""
-        caller = CURRENT_TOKEN.get()
-        if not gate.is_service(caller):
-            return ("refused: codex_sync reconciles the whole books folder and needs "
-                    "the service token; personal tokens use the granular tools instead.")
-        return tools.sync(dry_run=dry_run, token=caller, api_url=api_url)
-
     app = mcp.streamable_http_app()
     return TokenAuthMiddleware(app, gate, public_url)
 
@@ -211,10 +200,9 @@ def main() -> int:
     token = os.environ.get("API_KEY", "")
     if not token:
         print("ERROR: API_KEY not set."); return 2
-    books_root = os.environ.get("CODEX_BOOKS_DIR", "/srv/codex/books")
     api_url = os.environ.get("CODEX_API_URL", "http://127.0.0.1:8081/api.php")
     public_url = os.environ.get("CODEX_PUBLIC_URL", "")
-    app = build_app(token, books_root, api_url, public_url=public_url)
+    app = build_app(token, api_url, public_url=public_url)
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8765)
     return 0

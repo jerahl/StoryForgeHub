@@ -17,7 +17,7 @@ Two kinds are accepted:
   validated against `api.php` and cached for 60s (`mcp_auth.VALIDATE_TTL`), so
   a revoked token dies within a minute.
 - **The service `API_KEY`** (from `/etc/codex/codex.env`) — unscoped, for
-  admin automation and the reconcile. Checked in constant time, no round-trip.
+  admin automation. Checked in constant time, no round-trip.
 
 The server runs FastMCP **stateless**, so each tool call executes inside the
 HTTP request that carried it and the caller's token rides a contextvar
@@ -26,7 +26,7 @@ two users on the connector at once cannot bleed into each other (covered by
 the e2e suite below).
 
 ## Files
-- `mcp_tools.py` — the capabilities (call api.php / run the reconcile cycle). Tested offline.
+- `mcp_tools.py` — the capabilities (thin api.php clients). Tested offline.
 - `mcp_auth.py` — the token gate (extract, constant-time service check, TTL-cached per-user validation). Stdlib-only, tested offline.
 - `mcp_server.py` — FastMCP stateless streamable-http app + token middleware.
 - `requirements.txt` — `mcp`, `uvicorn` (installed into `.venv` by 04-configure.sh).
@@ -43,29 +43,23 @@ to merge against — never a clobber), `codex_create_chapter`, `codex_push_files
 `codex_create_task`, `codex_update_task`, `codex_complete_task`,
 `codex_log_writing`. Every write flows through api.php, at the caller's role, and
 records a revision with the caller's identity (A1).
-Admin: `codex_sync(dry_run)` — service token only; personal tokens are refused
-(it reconciles the whole books folder). Retires with the A4 cutover.
 
 The granular reads/writes ride api.php's object-level actions (`chapter`,
 `save_chapter`, `chapter_create`, `entries`, `search`, `diagnostics`,
 `task_create`, `task_update`); only `codex_get_entry`/`codex_list_chapters`/
 `codex_status` still read via the `export` snapshot.
 
-### Pushing new files
-- `codex_save_entry(book, db, slug, markdown)` — a Codex entry.
-- `codex_save_chapter(book, filename, markdown)` — a manuscript chapter.
+### Bulk Markdown writes
 - `codex_push_files(book, files, reconcile_chapters=False)` — a map of
   relpath→Markdown for any type api.php's push understands: `Manuscript/<file>.md`,
   `Codex/<Folder>/<slug>.md`, `Codex/Notes/<slug>.md`, `Codex/Meta/<slug>.md`,
-  `Codex/Sources/<key>.md`, `Codex/Meta/progressions.md`.
-
-The book's on-disk folder is resolved from the live `export` snapshot, so pushes
-work without a populated `CODEX_BOOKS_DIR`. Pushing a `Manuscript/*.md` file
-normally makes the app archive every chapter the folder omits; the chapter/push
-tools guard against this by declaring the book's current chapters present, so
-**adding** a chapter never archives the others. Pass `reconcile_chapters=True`
-(or `reconcile=True` on `codex_save_chapter`) only when you intend a full
-manuscript reconcile that archives omitted chapters.
+  `Codex/Sources/<key>.md`, `Codex/Meta/progressions.md`. The `folder` prefix is
+  resolved from the live `export` snapshot — it's a payload key, not a disk path.
+  Pushing `Manuscript/*.md` normally archives every chapter the payload omits;
+  the tool guards against this by declaring the book's current chapters present,
+  so **adding** a chapter never archives the others (`reconcile_chapters=True`
+  opts into the archive behaviour). For single chapters prefer the guarded
+  `codex_save_chapter`.
 
 ## Bring it up
 ```bash
@@ -110,8 +104,9 @@ log. Tokens are revocable per-user on the Account page; rotate the service
   `php -S` over a seeded sqlite DB plus the real MCP server under uvicorn and
   drives it with the MCP client SDK as three identities — no token (401),
   the service key (unscoped), and a personal token (scoped to its book,
-  refused elsewhere, `codex_sync` refused, identities stable across
-  interleaved sessions). Needs php-cli + `pip install mcp uvicorn`.
+  refused elsewhere, guarded chapter saves, identities stable across
+  interleaved sessions), plus the full OAuth dance. Needs php-cli +
+  `pip install mcp uvicorn`.
 - On-box smoke: `mcp_smoke.py` (unchanged; works with either token kind).
 
 ## Notes / next
@@ -121,8 +116,7 @@ log. Tokens are revocable per-user on the Account page; rotate the service
 - `codex_get_entry`/`codex_list_chapters`/`codex_status` still read the whole
   `export` snapshot — fine at this size; move them to granular actions if it
   grows.
-- The DB-canonical flip (Track A) is in: the app no longer needs
-  `CODEX_BOOKS_DIR`, `codex_save_chapter` rides the base-hash-guarded
-  `save_chapter` action, and every save records an attributed revision.
-  `codex_sync` + mirror mode survive only until the A4 cutover (runbook in
-  MASTER-PLAN-standalone A4).
+- The DB-canonical cutover (Track A, A4) is complete: the app has no books
+  directory, `codex_save_chapter` rides the base-hash-guarded `save_chapter`
+  action, every save records an attributed revision, and `codex_sync` + the
+  reconcile engine are gone — `bin/export.php` is the way prose becomes files.

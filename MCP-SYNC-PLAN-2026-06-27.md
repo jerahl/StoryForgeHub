@@ -1,11 +1,12 @@
 # Codex MCP sync service — design
 
-> ⚠ **PARTIALLY SUPERSEDED (2026-06-28).** The runtime model changed with the move to a
-> **Debian VPS**: the MCP server is now a **server-side `systemd` service over HTTPS with
-> continuous `systemd`-timer sync** (not a local stdio, on-demand script), and the
-> folder↔DB reconcile runs **locally on the box**. See `MASTER-PLAN-vps-2026-06-28.md`
-> (Phases 2–3) for the current design. The tool surface, reconcile guarantees, and the
-> reuse of `codex_sync_lib.py` below are still accurate.
+> ⚠ **HISTORICAL (2026-07-06, A4 cutover).** First partially superseded by the VPS
+> move (`MASTER-PLAN-vps-2026-06-28.md`, server-side service + timer instead of local
+> stdio), then fully retired by the **DB-canonical flip**
+> (`MASTER-PLAN-standalone-2026-07-06.md`, Track A): the database is the single source
+> of truth, there is no folder to reconcile, and `codex_sync` + the reconcile engine
+> were deleted at the A4 cutover. The MCP service lives on with a granular, per-user
+> tool surface — see `sync_engine/MCP-SERVER.md`. Kept for the design history.
 
 Replacing the `sync-codex.ps1` scheduled task with a **Python MCP server** that Claude connects to directly, so sync and Codex operations happen as live tool calls instead of files passed through a bridge folder.
 

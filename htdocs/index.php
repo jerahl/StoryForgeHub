@@ -1297,7 +1297,7 @@ case 'chapter':
     $next = one("SELECT id,title FROM chapters WHERE book_id=? AND (num+0)>(SELECT (num+0) FROM chapters WHERE id=?) ORDER BY (num+0) ASC LIMIT 1", [$book['id'],$c['id']]);
     echo '<div class="pagehead"><div><h1>'.e($c['title']).'</h1><p class="desc">Chapter '.e($c['num']).' · '.e($c['words']).' words</p></div></div>';
     echo '<div class="toolbar"><a class="btn sm" href="'.url(['p'=>'manuscript','book'=>$book['id']]).'">← All chapters</a>';
-    if (cfg()['books_dir'] ?? '') echo '<a class="btn sm" href="'.url(['p'=>'chapter_edit','book'=>$book['id'],'id'=>$c['id']]).'">Edit prose</a>';
+    if (user_can($book['id'], 'edit')) echo '<a class="btn sm" href="'.url(['p'=>'chapter_edit','book'=>$book['id'],'id'=>$c['id']]).'">Edit prose</a>';
     echo '<a class="btn sm" href="'.url(['p'=>'diagnostics','book'=>$book['id'],'id'=>$c['id']]).'">Diagnostics</a>';
     if (trim((string)$c['body']) !== '') echo '<button type="button" class="btn sm primary" id="smartToggle">✦ Smart editing</button>';
     echo '<span style="margin-left:6px">Status:</span> '.status_select($book['id'], $c, 'chapter');

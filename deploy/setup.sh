@@ -44,7 +44,6 @@ step "Preflight"
 [[ "${ID:-}" == "debian" ]] || warn "expected Debian; found '${ID:-unknown}' — proceeding anyway"
 info "Domain:      $CODEX_DOMAIN"
 info "App root:    $CODEX_APP_ROOT"
-info "Books dir:   $CODEX_BOOKS_DIR"
 info "Web server:  $WEB_SERVER"
 info "DB:          $CODEX_DB_NAME (user $CODEX_DB_USER @ localhost)"
 echo
@@ -73,11 +72,10 @@ if [[ "$DRY" == "1" ]]; then step "Dry run complete"; exit 0; fi
 step "Initial setup complete"
 cat <<EOF
     Next steps:
-      1. Copy your book folders:   rsync -av /local/Codex/ $CODEX_BOOKS_DIR/
-      2. Import data:              mysql $CODEX_DB_NAME < dump.sql
-                                   (or app Sync -> Import snapshot.json)
-      3. Confirm TLS:              https://$CODEX_DOMAIN
-      4. Smoke test:               sudo bash $DEPLOY_DIR/verify.sh
+      1. Import data:              mysql $CODEX_DB_NAME < dump.sql
+                                   (or app Sync -> Import snapshot.json / Import book .zip)
+      2. Confirm TLS:              https://$CODEX_DOMAIN
+      3. Smoke test:               sudo bash $DEPLOY_DIR/verify.sh
       5. Decommission Wasmer once the site serves clean and data verifies.
 
     Secrets live in $CODEX_ENV_FILE (rotate any value ever committed in plaintext).

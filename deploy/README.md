@@ -37,14 +37,14 @@ changes nothing already correct.
 | `setup.sh` | P0 | Orchestrator. Runs 01–04 in order. Flags: `--only N,N`, `--from N`, `--yes`, `--dry-run`. |
 | `01-provision.sh` | P0.1 | Non-root sudo user, SSH key-only, `ufw` 22/80/443, `fail2ban`, unattended upgrades, hostname. |
 | `02-install-stack.sh` | P0.2 | php-fpm 8.3 (+pdo_mysql, mbstring, xml, curl, gd, opcache), MariaDB (localhost-bound), Caddy/nginx. Dedicated php-fpm pool. |
-| `03-setup-app.sh` | P0.3, P0.5 | Creates `codex` DB + least-priv `localhost` user, imports `schema.sql`, deploys the app to `/srv/codex/app` (web docroot = `/srv/codex/app/htdocs`; internals like `src/`/`config.php` sit above it), creates `/srv/codex/books`, **generates and stores DB password + API_KEY**. |
+| `03-setup-app.sh` | P0.3, P0.5 | Creates `codex` DB + least-priv `localhost` user, imports `schema.sql`, deploys the app to `/srv/codex/app` (web docroot = `/srv/codex/app/htdocs`; internals like `src/`/`config.php` sit above it), **generates and stores DB password + API_KEY**. |
 | `04-configure.sh` | P0.4, Security | Injects secrets into php-fpm via systemd `EnvironmentFile`, renders the Caddyfile/nginx vhost (with deny blocks + `/mcp` stub), installs the backup timer, **stages** the Phase-3/5 units. |
 | `verify.sh` | — | Read-only smoke test: services, firewall, secrets, DB, HTTPS, deny rules. |
-| `backup.sh` | Security | Nightly `mysqldump` + books tarball (installed to `/usr/local/sbin`, run by `codex-backup.timer`). |
+| `backup.sh` | Security | Nightly `mysqldump` + canonical Markdown export tarball (installed to `/usr/local/sbin`, run by `codex-backup.timer`). |
 
 ## Config knobs (`deploy.env`)
 
-`CODEX_DOMAIN`, `CODEX_ADMIN_USER`, `CODEX_APP_ROOT`, `CODEX_BOOKS_DIR`,
+`CODEX_DOMAIN`, `CODEX_ADMIN_USER`, `CODEX_APP_ROOT`,
 `CODEX_ENV_FILE`, `CODEX_DB_NAME`/`CODEX_DB_USER`, `PHP_VERSION`, `WEB_SERVER`
 (`caddy`|`nginx`), `SYNC_INTERVAL_MIN`, `BACKUP_DIR`. Unset = defaults in
 `lib.sh`.
@@ -60,20 +60,18 @@ the DB password and API key; set `APP_PASSWORD` by hand if you want the UI gate.
 
 ## After setup
 
-1. Copy book folders: `rsync -av /local/Codex/ /srv/codex/books/`
-2. Import data: `mysql codex < dump.sql` **or** app **Sync → Import snapshot.json** (runs `migrate()` first).
-3. Confirm `https://CODEX_DOMAIN` serves with valid TLS.
-4. **Decommission Wasmer**: repoint DNS, archive the Wasmer app; `app.yaml` / `wasmer.toml` become historical.
+1. Import data: `mysql codex < dump.sql` **or** app **Sync → Import snapshot.json** / **Import book (.zip)** (runs `migrate()` first).
+2. Confirm `https://CODEX_DOMAIN` serves with valid TLS.
+3. **Decommission Wasmer**: repoint DNS, archive the Wasmer app; `app.yaml` / `wasmer.toml` become historical.
 
-## Phases 2/3/5 (not enabled yet)
+## Services
 
-The MCP service, continuous-sync timer, and reindex timer are **installed but
-disabled** — they need code from later phases (`sync_engine.py`, the MCP server,
-`index_mentions()`). When that lands:
+The MCP service and the reindex timer are **installed but disabled** until you
+enable them (the folder-sync timer retired with the A4 cutover — the DB is
+canonical and there is nothing to sync):
 
 ```bash
-sudo systemctl enable --now codex-sync.timer codex-reindex.timer codex-mcp.service
-# then uncomment the /mcp reverse-proxy block in the web server config and reload
+sudo systemctl enable --now codex-reindex.timer codex-mcp.service codex-backup.timer
 ```
 
 ## Notes / caveats

@@ -1,9 +1,9 @@
 """
 mcp_smoke.py — end-to-end smoke test of the MCP tool surface (run ON the box).
 
-Connects to the local MCP server over loopback with the bearer token, lists the
-tools, then calls codex_status and codex_sync(dry_run=True). Proves the whole
-path: MCP transport -> tools -> api.php -> DB.
+Connects to the local MCP server over loopback with a bearer token, lists the
+tools, then calls codex_status and codex_search. Proves the whole path:
+MCP transport -> tools -> api.php -> DB.
 
     API_KEY=$(grep ^API_KEY= /etc/codex/codex.env | cut -d= -f2-) \
       /srv/codex/app/sync_engine/.venv/bin/python /srv/codex/app/sync_engine/mcp_smoke.py
@@ -33,11 +33,7 @@ async def main() -> int:
             tools = await session.list_tools()
             print("tools:", ", ".join(t.name for t in tools.tools))
             print("\ncodex_status ->", _show(await session.call_tool("codex_status", {})))
-            print("\ncodex_sync(dry_run=True) ->")
-            r = await session.call_tool("codex_sync", {"dry_run": True})
-            for c in r.content:
-                if getattr(c, "text", None):
-                    print(c.text)
+            print("\ncodex_search('the') ->", _show(await session.call_tool("codex_search", {"query": "the", "limit": 3})))
     return 0
 
 

@@ -3,8 +3,8 @@
  * db_canonical_test.php — fixture checks for the DB-canonical flip (standalone
  * plan, Track A): the app works fully with NO books directory, the base-hash
  * conflict rule survives the flip, every save through any door records a
- * revision with attribution, entry history restores, mirror mode projects to
- * disk best-effort, and bin/export.php regenerates clean Markdown folders.
+ * revision with attribution, entry history restores, and bin/export.php
+ * regenerates clean Markdown folders (post-A4: the ONLY way prose becomes files).
  *
  *   php tests/php/db_canonical_test.php
  */
@@ -90,35 +90,7 @@ delete_entry($bid, 'characters', 'aria');
 $erevs = get_entry_revisions($bid, 'characters', 'aria');
 check('delete records a final delete-kind revision', $erevs && $erevs[0]['kind'] === 'delete');
 
-/* ---- mirror mode: with a books dir the save also projects to disk.
- * cfg() caches per process, so run the mirror scenario in a subprocess with
- * CODEX_BOOKS_DIR set. ---- */
-@mkdir($work . '/books', 0775, true);
-$mirrorScript = <<<'PHP'
-<?php
-require_once $argv[1] . '/src/repo.php';
-migrate();
-$rb = create_book(['title' => 'Mirror Book', 'profile' => 'fiction']);
-$rc = create_chapter($rb['id'], 'One', '1');
-$b  = md5(md_body_norm(get_chapter((int)$rc['id'])['body']));
-$r  = write_chapter_file($rb['id'], (int)$rc['id'], "## Chapter 1 — One\n\nMirrored.", $b);
-echo $r['status'], "\n";
-PHP;
-file_put_contents($work . '/mirror_probe.php', $mirrorScript);
-exec('DB_DRIVER=sqlite DB_PATH=' . escapeshellarg($tmp)
-     . ' CODEX_BOOKS_DIR=' . escapeshellarg($work . '/books')
-     . ' php ' . escapeshellarg($work . '/mirror_probe.php') . ' ' . escapeshellarg(dirname(__DIR__, 2)) . ' 2>&1',
-     $mout, $mcode);
-check('mirror: subprocess save succeeds', $mcode === 0 && trim(end($mout) ?: '') === 'ok');
-check('mirror: create_book lays the folder skeleton', is_dir($work.'/books/mirror-book/Manuscript'));
-check('mirror: chapter save projects the new body to disk',
-      is_file($work.'/books/mirror-book/Manuscript/ch-01-one.md')
-      && strpos((string)file_get_contents($work.'/books/mirror-book/Manuscript/ch-01-one.md'), 'Mirrored') !== false);
-check('mirror: DB is still the truth (body matches disk)',
-      strpos((string)val("SELECT body FROM chapters WHERE file='ch-01-one.md'"), 'Mirrored') !== false);
-
 /* ---- export: regenerate canonical folders from the DB ---- */
-putenv('CODEX_BOOKS_DIR');
 save_entry($bid, 'characters', ['slug'=>'bram', 'name'=>'Bram', 'status'=>'seed', 'type'=>'Character',
     'fields'=>[], 'sections'=>[['h'=>'Overview','body'=>'A guard.']]]);
 $exp = $work . '/export';

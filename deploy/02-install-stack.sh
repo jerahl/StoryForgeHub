@@ -71,7 +71,6 @@ env[DB_USERNAME]     = \$DB_USERNAME
 env[DB_PASSWORD]     = \$DB_PASSWORD
 env[API_KEY]         = \$API_KEY
 env[APP_PASSWORD]    = \$APP_PASSWORD
-env[CODEX_BOOKS_DIR] = \$CODEX_BOOKS_DIR
 EOF
 rm -f "$PHP_FPM_POOL.tmp"
 # Remove the default pool so only the codex socket serves the app.

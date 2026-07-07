@@ -252,14 +252,12 @@ function other_editor_names($chapter_id, $exclude_uid) {
     return array_map(function ($r) { return $r['display_name'] ?: ($r['email'] ?: 'Someone'); }, active_editors($chapter_id, $exclude_uid));
 }
 
-/** Save edited chapter prose — the DB is canonical (standalone plan, A2).
+/** Save edited chapter prose — the DB is canonical (standalone plan, A2/A4).
  *  Keeps the CONFLICT-not-overwrite rule from Phase 9/21: the edit page stamps
  *  md5() of the body it loaded, and the save is REFUSED if chapters.body moved
- *  underneath it (a co-author, the MCP, or — during the cutover window — the
- *  sync). The writer's draft survives as an autosave (Phase 15) either way.
- *  Mirror mode: while CODEX_BOOKS_DIR is still configured, the .md file is
- *  also written best-effort AFTER the DB commit — a mirror failure never fails
- *  the save. (The name is historical; disk is a projection now, not the truth.)
+ *  underneath it (a co-author or the MCP). The writer's draft survives as an
+ *  autosave (Phase 15) either way. (The name is historical — nothing touches
+ *  disk since the A4 cutover; bin/export.php regenerates files on demand.)
  *  Returns ['ok'|'conflict'|'error', 'msg'=>...]. */
 function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     $c = get_chapter($chapter_id);
@@ -284,43 +282,13 @@ function write_chapter_file($book_id, $chapter_id, $new_md, $base = '') {
     reconcile_citations($book_id);   // Phase 12: prose edit may add/remove [^cite:key] tokens
     save_chapter_snapshot($book_id, (int)$chapter_id, $c['file'], $new_md, 'save');  // Phase 15: recoverable history
     discard_chapter_autosave($book_id, (int)$chapter_id);                            // committed — drop the working draft
-    mirror_chapter_file($book_id, $c['file'], $new_md);                              // A2: best-effort, after the commit
     return ['status'=>'ok', 'msg'=>'Saved.'];
 }
 
-/** A2 transitional mirror: while CODEX_BOOKS_DIR is configured, project a saved
- *  chapter body onto its .md file (backed up first by write_manuscript_bytes).
- *  Best-effort by design — the DB commit already happened; a disk problem is
- *  reported nowhere fatal. Deleted with the A4 cutover. */
-function mirror_chapter_file($book_id, $file, $md) {
-    if (!books_dir_set()) return;
-    $rel = ltrim(str_replace('\\', '/', (string)$file), '/');
-    if ($rel === '' || strpos($rel, '..') !== false) return;
-    $root = book_root($book_id);
-    if (!$root) return;
-    try { write_manuscript_bytes($root.'/Manuscript/'.$rel, $md); } catch (Exception $e) {}
-}
-
-/* ------------------------------------------ create / import (shared plumbing) */
-/** True when the transitional MIRROR MODE is on (standalone plan, A2): the DB is
- *  canonical everywhere, but while CODEX_BOOKS_DIR is still configured every
- *  chapter/book write is also projected onto the .md folders (best-effort) so
- *  the old folder stays warm through the cutover window. Nothing is gated on
- *  this any more; it disappears with the A4 cutover. */
-function books_dir_set() { return (cfg()['books_dir'] ?? '') !== ''; }
-
-/** On-disk root for a single book, resolved from the book row (Phase 18). One
- *  directory per book — currently <books_dir>/<folder>; centralized here so a
- *  future <books_dir>/<id> relocation is a one-line change, not a callsite hunt.
- *  Returns null when the books root isn't configured. $book may be a row or id. */
-function book_root($book) {
-    $books = cfg()['books_dir'] ?? '';
-    if ($books === '') return null;
-    if (!is_array($book)) $book = one("SELECT folder FROM books WHERE id=?", [$book]);
-    $folder = $book['folder'] ?? '';
-    if ($folder === '') return null;
-    return rtrim($books, '/') . '/' . $folder;
-}
+/* ------------------------------------------ create / import (shared plumbing)
+ * A4 cutover: the transitional mirror mode (CODEX_BOOKS_DIR) is gone. Nothing
+ * in the app touches book folders any more — bin/export.php regenerates them
+ * on demand, and import (zip / api push / seed) reads them. */
 
 /** slug for a book folder / id or a chapter filename base: lowercase, ascii, dashes. */
 function slugify_folder($s) {
@@ -329,47 +297,15 @@ function slugify_folder($s) {
     return trim((string)preg_replace('/-+/', '-', $s), '-');
 }
 
-/** Resolve + safety-check an absolute path inside a book's Manuscript/ folder.
- *  $rel is a path relative to Manuscript/. Returns [absolute_path, error]; with
- *  mirror mode off the path is null and that is NOT an error — there is simply
- *  no disk to touch (A2). */
-function manuscript_path($book, $rel) {
-    $rel = ltrim(str_replace('\\', '/', (string)$rel), '/');
-    if (strpos($rel, '..') !== false) return [null, 'Bad chapter path.'];
-    if (!books_dir_set()) return [null, null];
-    return [book_root($book).'/Manuscript/'.$rel, null];
-}
-
-/** Physical prose writer shared by chapter editing (P9) and create/import: mkdir
- *  the parent, timestamped-backup any existing file, then write. Does NOT
- *  conflict-check — callers own the never-clobber decision (create refuses when the
- *  file exists; the editor compares against the DB body). Returns ['status','msg']. */
-function write_manuscript_bytes($path, $md) {
-    $dir = dirname($path);
-    if (is_file($path)) {
-        $bdir = $dir.'/_backups';
-        @mkdir($bdir, 0775, true);
-        @copy($path, $bdir.'/'.basename($path).'.'.date('Ymd-His').'.bak');
-    } else {
-        @mkdir($dir, 0775, true);
-    }
-    if (@file_put_contents($path, $md) === false)
-        return ['status'=>'error', 'msg'=>'Could not write '.$path.' (check php-fpm write permission on the books folder).'];
-    return ['status'=>'ok', 'msg'=>'Wrote '.basename($path).'.'];
-}
-
-/** A Manuscript/ filename that collides with neither a DB row nor (in mirror
- *  mode) an on-disk file. $base is a slug with no extension; appends -2, -3…
- *  until free. */
+/** A Manuscript/ filename no DB row holds yet. $base is a slug with no
+ *  extension; appends -2, -3… until free. */
 function unique_manuscript_file($book, $base) {
     $base = $base !== '' ? $base : 'chapter';
     $cand = $base.'.md'; $n = 2;
-    while (true) {
-        [$path, ] = manuscript_path($book, $cand);
-        $inDb = val("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book['id'], $cand]);
-        if (!$inDb && ($path === null || !is_file($path))) return $cand;
+    while (val("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book['id'], $cand])) {
         $cand = $base.'-'.$n.'.md'; $n++;
     }
+    return $cand;
 }
 
 /** A book id not already taken. */
@@ -380,19 +316,17 @@ function unique_book_id($base) {
     return $id;
 }
 
-/** A book folder name that is neither an existing DB folder nor an on-disk dir. */
+/** A book folder name (the export/import relpath prefix) no book uses yet. */
 function unique_book_folder($base) {
     $base = $base !== '' ? $base : 'book';
-    $books = cfg()['books_dir'] ?? '';
     $folder = $base; $n = 2;
-    while (book_id_for_folder($folder) || ($books && is_dir(rtrim($books, '/').'/'.$folder))) { $folder = $base.'-'.$n; $n++; }
+    while (book_id_for_folder($folder)) { $folder = $base.'-'.$n; $n++; }
     return $folder;
 }
 
 /** Function 1 — New chapter. Inserts the chapter (DB-canonical, A2) via
- *  upsert_chapter_from_md(), optionally assigns it to an act, and mirrors the
- *  .md file when mirror mode is on. Never clobbers: the derived filename is
- *  deduped against the DB (and the disk, in mirror mode).
+ *  upsert_chapter_from_md() and optionally assigns it to an act. Never
+ *  clobbers: the derived filename is deduped against the DB.
  *  Returns ['status','msg','id'?,'file'?]. */
 function create_chapter($book_id, $title, $num = '', $act_id = '') {
     $b = get_book($book_id);
@@ -408,7 +342,7 @@ function create_chapter($book_id, $title, $num = '', $act_id = '') {
     $numeric = preg_match('/^\d+$/', $num);
     $numPad = $numeric ? str_pad($num, 2, '0', STR_PAD_LEFT) : '';
 
-    // Match the book's ch-NN-title.md convention; dedupe against DB (+ disk in mirror mode).
+    // Match the book's ch-NN-title.md convention; dedupe against the DB.
     $base = ($numPad !== '' ? 'ch-'.$numPad.'-' : '').slugify_folder($title);
     $file = unique_manuscript_file($b, rtrim($base, '-'));
 
@@ -419,13 +353,12 @@ function create_chapter($book_id, $title, $num = '', $act_id = '') {
     $cid = $row ? (int)$row['id'] : 0;
     if ($cid) save_chapter_snapshot($book_id, $cid, $file, $md, 'save');
     if ($cid && $act_id !== '' && $act_id !== null) set_chapter_act($cid, $book_id, $act_id);
-    mirror_chapter_file($book_id, $file, $md);
     return ['status'=>'ok', 'msg'=>'Created chapter “'.$title.'”.', 'id'=>$cid, 'file'=>$file];
 }
 
 /** Function 3a — import one chapter from Markdown (paste or a single .md upload).
- *  Sanitize the filename, never clobber (dedupe against the DB), upsert into the
- *  DB (canonical, A2), then mirror the file when mirror mode is on.
+ *  Sanitize the filename, never clobber (dedupe against the DB), upsert into
+ *  the DB (canonical, A2).
  *  Returns ['status','msg','id'?,'file'?]. */
 function import_chapter_md($book_id, $filename, $content) {
     $b = get_book($book_id);
@@ -446,17 +379,13 @@ function import_chapter_md($book_id, $filename, $content) {
     upsert_chapter_from_md($book_id, $file, $content);
     $row = one("SELECT id FROM chapters WHERE book_id=? AND file=?", [$book_id, $file]);
     if ($row) save_chapter_snapshot($book_id, (int)$row['id'], $file, $content, 'save');
-    mirror_chapter_file($book_id, $file, $content);
     return ['status'=>'ok', 'msg'=>'Imported '.$file.'.', 'id'=>$row ? (int)$row['id'] : 0, 'file'=>$file];
 }
 
-/** Function 2 — New book. Derives a unique id + folder name from the title and
- *  writes the book row via save_book() with the chosen profile (DB-canonical,
- *  A2). In mirror mode the folder skeleton (Manuscript/ + Codex/<each profile
- *  db>/ + Codex/Meta/) is also created on disk, best-effort.
- *  Returns ['status','msg','id'?]. */
+/** Function 2 — New book. Derives a unique id + folder name (the export
+ *  relpath prefix) from the title and writes the book row via save_book()
+ *  with the chosen profile (DB-canonical). Returns ['status','msg','id'?]. */
 function create_book($f) {
-    $books = cfg()['books_dir'] ?? '';
     $title = trim((string)($f['title'] ?? ''));
     if ($title === '') return ['status'=>'error', 'msg'=>'Give the book a title.'];
     $profile = normalize_profile($f['profile'] ?? 'fiction');
@@ -464,16 +393,6 @@ function create_book($f) {
     $slug   = slugify_folder($title) ?: 'book';
     $folder = unique_book_folder($slug);
     $id     = unique_book_id($slug);
-
-    if (books_dir_set()) {   // mirror: lay the folder skeleton, best-effort
-        $root = rtrim($books, '/').'/'.$folder;
-        @mkdir($root.'/Manuscript', 0775, true);
-        foreach (dbmeta_for($profile) as $meta) {
-            $fdr = $meta['folder'] ?? '';
-            if ($fdr !== '') @mkdir($root.'/Codex/'.$fdr, 0775, true);
-        }
-        @mkdir($root.'/Codex/Meta', 0775, true);
-    }
 
     save_book([
         'id'=>$id, 'folder'=>$folder, 'title'=>$title,
@@ -491,13 +410,11 @@ function create_book($f) {
 
 /** Function 3b — import a zipped book folder. Reads the .md payload straight out
  *  of the archive (zip-slip + size guards) and loads it into the DB via
- *  push_files() — no new parse logic, no disk required (A2). In mirror mode the
- *  whole archive is also extracted into a fresh (deduped) folder under books_dir.
- *  The zip may wrap the book in a single top folder (stripped) or hold
- *  Codex//Manuscript at its root. Returns ['status','msg','id'?,'report'?]. */
+ *  push_files() — no new parse logic, no disk touched. The zip may wrap the
+ *  book in a single top folder (stripped) or hold Codex//Manuscript at its
+ *  root. Returns ['status','msg','id'?,'report'?]. */
 function import_book_zip($zip_path, $opts = []) {
     if (!class_exists('ZipArchive')) return ['status'=>'error', 'msg'=>'ZIP support (php-zip) is not available on this server.'];
-    $books = cfg()['books_dir'] ?? '';
 
     $za = new ZipArchive();
     if ($za->open($zip_path) !== true) return ['status'=>'error', 'msg'=>'Could not open that .zip file.'];
@@ -547,28 +464,14 @@ function import_book_zip($zip_path, $opts = []) {
     $folder  = unique_book_folder($slug);   // never reuse an existing book's folder name
     $id      = unique_book_id($slug);
 
-    $mirror = books_dir_set();
-    $root   = $mirror ? rtrim($books, '/').'/'.$folder : null;
-    if ($mirror) @mkdir($root, 0775, true);
-
-    // Gather the .md payload for the DB straight from the archive; extract the
-    // full tree to disk only when the mirror is on.
+    // Gather the .md payload for the DB straight from the archive.
     $payload = []; $present = [];
     foreach ($rels as $rel => $idx) {
-        $isMd = preg_match('#^(Codex|Manuscript)/#', $rel) && preg_match('/\.md$/i', $rel);
-        if (!$isMd && !$mirror) continue;               // non-.md files only matter on disk
+        if (!preg_match('#^(Codex|Manuscript)/#', $rel) || !preg_match('/\.md$/i', $rel)) continue;
         $data = $za->getFromIndex($idx);
         if ($data === false) continue;
-        if ($mirror && is_dir($root)) {
-            $abs = $root.'/'.$rel;
-            $dir = dirname($abs);
-            if (!is_dir($dir)) @mkdir($dir, 0775, true);
-            @file_put_contents($abs, $data);
-        }
-        if ($isMd) {
-            $payload[$rel] = str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], $data);
-            if (preg_match('#^Manuscript/(.+\.md)$#i', $rel, $mm)) $present[] = basename($mm[1]);
-        }
+        $payload[$rel] = str_replace(["\r\n", "\r", "\x00"], ["\n", "\n", ''], $data);
+        if (preg_match('#^Manuscript/(.+\.md)$#i', $rel, $mm)) $present[] = basename($mm[1]);
     }
     $za->close();
 
@@ -1522,25 +1425,6 @@ function import_progressions_md($book_id, $content) {
             }
         }
     }
-}
-
-/* ===================================================== SYNC: pull files */
-/** Return { books: [ {folder, files:{relpath: rendered_md}} ] }  (web -> folder).
- *  Entries only — manuscript prose and hand-authored notes stay folder-owned. */
-function pull_files($book_id = null) {
-    $books = $book_id ? [get_book($book_id)] : get_books();
-    $out = [];
-    foreach ($books as $b) {
-        if (!$b) continue;
-        $files = [];
-        foreach (get_entries($b['id']) as $row) {
-            $e = entry_to_struct($row);
-            $folder = DBMETA[$e['db']]['folder'];
-            $files["Codex/$folder/{$e['slug']}.md"] = md_render_entry($e);
-        }
-        $out[] = ['folder' => $b['folder'], 'files' => $files];
-    }
-    return ['books' => $out];
 }
 
 /* ============================================ mentions / aliases (Phase 5) */

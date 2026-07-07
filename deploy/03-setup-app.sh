@@ -4,7 +4,7 @@
 # Creates the codex DB and a least-privilege localhost user, imports schema.sql,
 # deploys the app to $CODEX_APP_ROOT (docroot = $CODEX_APP_ROOT/htdocs; internals
 # above it), and creates the canonical book folder at
-# $CODEX_BOOKS_DIR. Writes the generated DB password into $CODEX_ENV_FILE.
+# Writes the generated DB password into $CODEX_ENV_FILE.
 # Idempotent: existing DB/user/files are reused, not clobbered.
 #
 # Run as root:  sudo bash deploy/03-setup-app.sh
@@ -99,12 +99,6 @@ install -d -o www-data -g www-data -m 2775 "$CODEX_DOCROOT/assets/vision"
 install -d -o www-data -g www-data -m 2775 "$CODEX_APP_ROOT/sync"
 [[ -d "$CODEX_DOCROOT" ]] || die "expected docroot $CODEX_DOCROOT after deploy (is htdocs/ present in the repo?)"
 ok "app deployed; web root = $CODEX_DOCROOT, internals above it (root:www-data)"
-
-step "Canonical book folders: $CODEX_BOOKS_DIR"
-install -d -o "$CODEX_ADMIN_USER" -g www-data -m 2770 "$CODEX_BOOKS_DIR"
-ok "ready (owner $CODEX_ADMIN_USER, group www-data, setgid)"
-info "Copy your Codex book folders here, e.g.:"
-info "  rsync -av /path/to/local/Codex/ $CODEX_BOOKS_DIR/"
 
 step "Done — DB + app deployed"
 info "Import existing data either way:"

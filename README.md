@@ -26,19 +26,20 @@ writing log."*
 ```
 
 > Retired along the way: the PC↔host sync (`sync-codex.ps1` + bridge folder) with the
-> VPS move, and the folder↔DB reconcile with the DB-canonical flip. During the cutover
-> window a transitional **mirror mode** (set `CODEX_BOOKS_DIR`) still projects saves
-> onto the old folders — see the A4 runbook in the standalone master plan.
+> VPS move, the folder↔DB reconcile with the DB-canonical flip, and finally the
+> transitional mirror mode + reconcile engine at the **A4 cutover** — the app never
+> touches book folders now. `bin/export.php` regenerates them on demand.
 
 ---
 
 ## Part A — Stand up the app on a Debian VPS (once)
 
 The app runs on a self-managed **Debian 12 VPS**: **nginx + php-fpm** (or Caddy) in front
-of `htdocs/`, **MariaDB/MySQL** on the box, and the canonical book folders at
-`/srv/codex/books`. Config reads all secrets from environment variables (see `config.php`
-/ `config.sample.php`), so nothing sensitive is committed. The full platform/sync/editor
-plan is in **`MASTER-PLAN-vps-2026-06-28.md`** (Phase 0 = this section).
+of `htdocs/`, and **MariaDB/MySQL** on the box — that's the whole install; there are no
+book folders to provision. Config reads all secrets from environment variables (see
+`config.php` / `config.sample.php`), so nothing sensitive is committed. Platform history:
+`MASTER-PLAN-vps-2026-06-28.md`; current architecture:
+`MASTER-PLAN-standalone-2026-07-06.md`.
 
 **You need:** a Debian VPS, a domain pointed at it, PHP 8.3 (`php-fpm` + `pdo_mysql`,
 `mbstring`, `xml`, `curl`, `gd`), and MariaDB.
@@ -57,7 +58,7 @@ plan is in **`MASTER-PLAN-vps-2026-06-28.md`** (Phase 0 = this section).
    DB_NAME=codex
    DB_USERNAME=codex
    DB_PASSWORD=…
-   API_KEY=<long random string — the sync token>
+   API_KEY=<long random string — the service API token>
    APP_PASSWORD=<first-run bootstrap gate — see below>
    ```
    `config.php` already reads these via `getenv()` — no code change.
@@ -77,7 +78,8 @@ plan is in **`MASTER-PLAN-vps-2026-06-28.md`** (Phase 0 = this section).
 - **Web:** open the site → **Sync → Import snapshot.json** → upload `sync/seed.json`
   (ships in this package; also runs the schema migration).
 - **Over SSH:** `php bin/seed.php --json sync/seed.json`, or
-  `php bin/seed.php --books /srv/codex/books` to seed straight from the folders.
+  `php bin/seed.php --books /path/to/book/folders` to seed straight from a folder tree
+  (a one-time import — the app never reads the folders again).
 
 Open the site. You should see all three books with their entries, chapters, words, and
 threads. (`seed.json` was generated from your live Codex on 2026-06-20.)
@@ -94,10 +96,9 @@ The DB is canonical (Track A), so there is nothing to sync. What replaces it:
   canonical Markdown folders (entries, chapters, notes, meta, progressions, sources,
   `book.json`) — the layout imports cleanly again. `deploy/backup.sh` tars one next to
   the `mysqldump` every night; copy both off-box.
-- **Transitional mirror mode:** while `CODEX_BOOKS_DIR` is still set, saves are also
-  projected onto the old book folders (best-effort, after the DB commit) so the folder
-  stays warm through the cutover window. The A4 runbook in
-  `MASTER-PLAN-standalone-2026-07-06.md` walks the final switch-off.
+- **A4 cutover: done.** Mirror mode and the reconcile engine are deleted; the app has
+  no `CODEX_BOOKS_DIR` at all. Your folder history remains wherever you archived it
+  (the runbook's tagged final export).
 
 The old guarantees survive the flip: nothing is auto-deleted (archives + revisions),
 and concurrent edits are refused with context rather than merged or clobbered — in the
@@ -121,23 +122,25 @@ for reference.
   round-trip seatbelt guarantees rich mode can never mangle the dialect; every save is
   a restorable revision.
 - **Flag work for Claude:** web app → **Tasks** → write a task, tick *Flag for Claude*.
-  Then tell Claude: **"check the web app for tasks and run them."** Claude runs each task
-  against the Codex, and the next sync marks it done and uploads the changes.
+  Then tell Claude: **"check my Codex for tasks and run them."** Claude works each task
+  through the MCP tools and marks it done — every change lands instantly, as Claude
+  acting with your account.
 - **Writing log:** add sessions by hand on the **Writing log** page, or say **"fill in
   the writing log"** and Claude logs the word delta from your manuscript automatically.
 
 ## Good to know
-- **Nothing is ever auto-deleted.** If an entry disappears on one side, the sync reports
-  it and leaves the other side alone.
-- **Conflicts** (same entry changed in the app *and* the folder before a sync) are
-  skipped and listed in `sync.log`; edit one side and re-run.
-- **Security:** all credentials live in Wasmer **secrets** (env vars), never in source —
-  set `API_KEY` long and random; Edge serves over HTTPS automatically. The UI is gated by
+- **Nothing is ever auto-deleted.** Chapters archive instead of deleting, entry deletes
+  record a final restorable revision, and every save through any door is in History.
+- **Conflicts are refused, not merged:** if two writers (or a writer and Claude) race on
+  the same chapter, the second save is refused with the current version attached — in
+  the app and over MCP alike. Nothing is clobbered.
+- **Security:** all credentials live in the env file (`/etc/codex/codex.env`), never in
+  source — set `API_KEY` long and random; Caddy serves HTTPS automatically. The UI is gated by
   per-user accounts (Phase 17): `APP_PASSWORD` is only the one-time secret for creating the
   first admin, then unused. Passwords are stored as `password_hash()` bcrypt hashes; sessions
   use an HttpOnly, SameSite cookie (Secure over HTTPS) and regenerate on login. Rotate
   `API_KEY`, `DB_PASSWORD`, and `APP_PASSWORD` if they've ever been committed in plaintext,
-  and update the sync client's token to match.
+  and update any automation's token to match.
 - **Accounts, invites & resets** (Phase 17) live under **Users & invites** (admins only) and
   **Account** (everyone). Onboarding is invite-only — no public registration endpoint exists.
 - **Book ownership & scoping** (Phase 18): the unit of ownership is the *book*, not the user —
@@ -159,7 +162,7 @@ for reference.
   in the editor and on the chapter page (a heartbeat-kept presence row, advisory only). Real-time
   Google-Docs-style co-editing is intentionally deferred (it needs the DB-canonical flip).
 - **Per-user API tokens** (Phase 20): the REST/MCP surface (`api.php`) takes two kinds of token.
-  The shared **service token** (`API_KEY`) stays unscoped for the PowerShell sync and admin
+  The shared **service token** (`API_KEY`) stays unscoped for admin
   automation. Each user can also mint **personal tokens** from **Account → API tokens** — Claude
   or the MCP presents one and the request *acts as that user*, so every read/write routes through
   the same membership scoping and role checks (reach only your books, at your role; snapshot

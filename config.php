@@ -42,9 +42,4 @@ return [
 
     // Where exported .md / bridge files are written on the server (optional).
     'sync_dir' => __DIR__ . '/sync',
-
-    // Canonical books root on the VPS. Required for in-app chapter editing
-    // (Phase 9: the app writes Manuscript/*.md back to disk). Empty = chapter
-    // editing disabled (chapters stay read-only / folder-owned).
-    'books_dir' => $env('CODEX_BOOKS_DIR', ''),
 ];

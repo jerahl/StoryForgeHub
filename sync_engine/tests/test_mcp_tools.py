@@ -55,7 +55,7 @@ class FakeApi:
 class Tools(unittest.TestCase):
     def setUp(self):
         self.api = FakeApi()
-        self.t = CodexTools(self.api, "/tmp/books")
+        self.t = CodexTools(self.api)
 
     def test_status(self):
         s = self.t.status()

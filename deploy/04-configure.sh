@@ -5,7 +5,7 @@
 #   - php-fpm systemd drop-in -> injects $CODEX_ENV_FILE (secrets reach getenv())
 #   - Caddyfile (or nginx vhost) rooted at the htdocs/ docroot, deny blocks + /mcp stub
 #   - backup.sh -> /usr/local/sbin + codex-backup.timer (ENABLED now)
-#   - codex-mcp / codex-sync / codex-reindex units (STAGED, not enabled — P3/P5)
+#   - codex-mcp / codex-reindex units (STAGED, not enabled)
 # Idempotent.
 #
 # Run as root:  sudo bash deploy/04-configure.sh
@@ -19,7 +19,7 @@ TPL="$DEPLOY_DIR/templates"
 # so literal $host / $uri in nginx configs survive).
 render() {
   local src="$1" dst="$2"
-  envsubst '${CODEX_DOMAIN} ${CODEX_APP_ROOT} ${CODEX_DOCROOT} ${CODEX_ENGINE_DIR} ${CODEX_BOOKS_DIR} ${CODEX_ENV_FILE} ${CODEX_ADMIN_USER} ${PHP_VERSION} ${SYNC_INTERVAL_MIN} ${BACKUP_DIR}' \
+  envsubst '${CODEX_DOMAIN} ${CODEX_APP_ROOT} ${CODEX_DOCROOT} ${CODEX_ENGINE_DIR} ${CODEX_ENV_FILE} ${CODEX_ADMIN_USER} ${PHP_VERSION} ${BACKUP_DIR}' \
     < "$src" > "$dst"
 }
 need_cmd envsubst
@@ -78,13 +78,15 @@ else
 fi
 
 step "Stage Phase-3/5 units (installed, NOT enabled)"
-for f in codex-mcp.service codex-sync.service codex-sync.timer \
-         codex-reindex.service codex-reindex.timer; do
+for f in codex-mcp.service codex-reindex.service codex-reindex.timer; do
   render "$TPL/${f}.tmpl" "/etc/systemd/system/$f"
 done
+# A4 cutover: the folder reconcile is retired — remove its units if an older
+# deploy staged them.
+systemctl disable --now codex-sync.timer codex-sync.service 2>/dev/null || true
+rm -f /etc/systemd/system/codex-sync.service /etc/systemd/system/codex-sync.timer
 systemctl daemon-reload
-ok "codex-mcp / codex-sync / codex-reindex staged"
-info "Continuous sync:  systemctl enable --now codex-sync.timer"
+ok "codex-mcp / codex-reindex staged (codex-sync retired)"
 info "MCP server:       systemctl enable --now codex-mcp.service   (then connect Claude to https://$CODEX_DOMAIN/mcp)"
 
 step "Done — configured"

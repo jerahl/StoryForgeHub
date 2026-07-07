@@ -60,8 +60,6 @@ async def main():
         check("alice updates the task", '"done by e2e"' in text_of(r))
         r = await s.call_tool("codex_create_task", {"book": "alien", "title": "sneaky"})
         check("task on a foreign book is refused", "unknown book" in text_of(r).lower() or "forbidden" in text_of(r).lower())
-        r = await s.call_tool("codex_sync", {"dry_run": True})
-        check("codex_sync refuses a personal token", "refused" in text_of(r))
         r = await s.call_tool("codex_list_entries", {"book": "echo"})
         check("entry list includes aria", "aria" in text_of(r))
 

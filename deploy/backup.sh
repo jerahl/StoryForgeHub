@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# backup.sh — nightly DB dump + Markdown export (+ books snapshot in mirror
-# mode). Installed to /usr/local/sbin/codex-backup.sh by 04-configure.sh and
+# backup.sh — nightly DB dump + canonical Markdown export.
+# Installed to /usr/local/sbin/codex-backup.sh by 04-configure.sh and
 # run by codex-backup.timer, whose EnvironmentFile injects DB_* etc. Run BY
 # HAND it loads the same values from /etc/codex/codex.env itself, so
 # `sudo ./deploy/backup.sh` just works. Keeps 14 days of backups.
@@ -26,7 +26,6 @@ if [[ -z "${DB_PASSWORD:-}" && -r "$CODEX_ENV_FILE" ]]; then
 fi
 
 BACKUP_DIR="${BACKUP_DIR:-/var/backups/codex}"
-CODEX_BOOKS_DIR="${CODEX_BOOKS_DIR:-/srv/codex/books}"
 DB_NAME="${DB_NAME:-codex}"
 DB_USERNAME="${DB_USERNAME:-codex}"
 DB_PASSWORD="${DB_PASSWORD:-}"
@@ -62,20 +61,13 @@ if [[ -f "$CODEX_APP_DIR/bin/export.php" ]] && command -v php >/dev/null; then
   fi
 fi
 
-# --- books folder (mirror mode only; retires with the A4 cutover) ---
-books_tar="$BACKUP_DIR/books-$ts.tar.gz"
-if [[ -d "$CODEX_BOOKS_DIR" ]]; then
-  tar -czf "$books_tar" -C "$(dirname "$CODEX_BOOKS_DIR")" "$(basename "$CODEX_BOOKS_DIR")"
-  echo "Books:      $books_tar ($(du -h "$books_tar" | cut -f1))"
-fi
-
 # --- prune old local backups ---
 find "$BACKUP_DIR" -name 'db-*.sql.gz'    -mtime +"$RETAIN_DAYS" -delete
 find "$BACKUP_DIR" -name 'books-*.tar.gz'  -mtime +"$RETAIN_DAYS" -delete
 find "$BACKUP_DIR" -name 'export-*.tar.gz' -mtime +"$RETAIN_DAYS" -delete
 
 # --- OFF-BOX COPY (recommended; configure and uncomment) ---
-# rclone copy "$db_dump"   remote:codex-backups/
-# rclone copy "$books_tar" remote:codex-backups/
+# rclone copy "$db_dump"                        remote:codex-backups/
+# rclone copy "$BACKUP_DIR/export-$ts.tar.gz"   remote:codex-backups/
 
 echo "Backup complete: $ts"

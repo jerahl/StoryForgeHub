@@ -47,7 +47,7 @@ switch ($action) {
 case 'ping':
     out(['ok' => true, 'app' => "Stephen's Codex", 'time' => date('c'), 'books' => count(get_books())]);
 
-case 'push':            // folder -> web   body: {books:[{folder,files:{relpath:content}}]}
+case 'push':            // bulk Markdown write   body: {books:[{folder,files:{relpath:content}}]}
     if (!$body || !isset($body['books'])) out(['error' => 'expected {books:[...]}'], 400);
     if (!$IS_SERVICE) {
         // A per-user token may only push to existing books it can edit; creating
@@ -59,10 +59,6 @@ case 'push':            // folder -> web   body: {books:[{folder,files:{relpath:
         }
     }
     out(['ok' => true, 'report' => push_files($body)]);
-
-case 'pull':            // web -> folder   ?book=ID   (get_book(s) is already scoped)
-    if (!$IS_SERVICE && isset($_GET['book'])) require_cap($_GET['book'], 'view');
-    out(['ok' => true] + pull_files($_GET['book'] ?? null));
 
 /* ---- granular object actions (standalone plan, Track A3 — the MCP surface) ---- */
 
@@ -238,5 +234,5 @@ case 'import':          // load a canonical snapshot — global op, admin/servic
     out(['ok' => true, 'books' => count($body['books'])]);
 
 default:
-    out(['error' => 'unknown action', 'actions' => ['ping','push','pull','chapter','save_chapter','chapter_create','entries','search','diagnostics','tasks','task_create','task_update','apply','writing-log','export','import']], 400);
+    out(['error' => 'unknown action', 'actions' => ['ping','push','chapter','save_chapter','chapter_create','entries','search','diagnostics','tasks','task_create','task_update','apply','writing-log','export','import']], 400);
 }

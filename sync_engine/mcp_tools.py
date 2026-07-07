@@ -1,15 +1,16 @@
 """
-mcp_tools.py — the capabilities behind the MCP server (MASTER-PLAN Phase 3).
+mcp_tools.py — the capabilities behind the MCP server.
 
-Pure-ish wrappers over api.php (the single DB-writer path) and the reconcile
-engine. Kept separate from the transport (mcp_server.py) so the logic is testable
-offline with a fake api object. Every write still flows through api.php.
+Pure wrappers over api.php (the single DB-writer path), kept separate from the
+transport (mcp_server.py) so the logic is testable offline with a fake api
+object. Every write flows through api.php at the caller's own identity. The
+folder reconcile engine that used to live beside this retired with the A4
+cutover — the DB is the source of truth.
 """
 from __future__ import annotations
 import datetime
 import os
 import re
-import subprocess
 import sys
 from typing import Any, Dict, List, Optional
 
@@ -21,10 +22,8 @@ from api_client import ApiError
 
 
 class CodexTools:
-    def __init__(self, api, books_root: str, engine_dir: Optional[str] = None):
+    def __init__(self, api):
         self.api = api
-        self.books_root = books_root
-        self.engine_dir = engine_dir or os.path.dirname(os.path.abspath(__file__))
 
     # ---- status / search / reads ----
     def status(self) -> Dict[str, Any]:
@@ -130,17 +129,13 @@ class CodexTools:
 
     # ---- writes ----
     def _resolve_book(self, book: str):
-        """Resolve a book to (folder, metadata, snapshot). Prefer the live server
-        snapshot (the source of truth for the on-disk folder name) and fall back
-        to the local books config, so a push works even without a populated
-        books_root. `snapshot` is the export's book struct (or None)."""
+        """Resolve a book to (folder, metadata, snapshot) from the live server
+        snapshot — `folder` is only a relpath prefix for the push payload now,
+        not an on-disk location. `snapshot` is the export's book struct."""
         for b in self.api.export().get("books", []):
             rec = b.get("book") or {}
             if rec.get("id") == book and rec.get("folder"):
                 return rec["folder"], dict(rec), b
-        cfg = {b["id"]: b for b in csl.load_books_config(self.books_root)}.get(book)
-        if cfg:
-            return cfg["folder"], {"id": book, **cfg}, None
         raise ValueError(f"unknown book {book}")
 
     def push_files(self, book: str, files: Dict[str, str],
@@ -210,16 +205,3 @@ class CodexTools:
             raise ValueError("title is required")
         return self.api.create_chapter({"book": book, "title": title, "num": num})
 
-    # ---- sync (runs the reconcile cycle out-of-process) ----
-    def sync(self, dry_run: bool = True, token: Optional[str] = None,
-             api_url: str = "http://127.0.0.1:8081/api.php") -> str:
-        cmd = [sys.executable, os.path.join(self.engine_dir, "cycle.py"),
-               "--books", self.books_root, "--api", api_url,
-               "--state", "/var/lib/codex/sync_state.json"]
-        if dry_run:
-            cmd.append("--dry-run")
-        env = dict(os.environ)
-        if token:
-            env["API_KEY"] = token
-        p = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=180)
-        return (p.stdout + p.stderr).strip()

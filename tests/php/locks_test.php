@@ -5,15 +5,10 @@
  *
  *   php tests/php/locks_test.php
  */
-$tmp   = tempnam(sys_get_temp_dir(), 'codex_lock_') . '.sqlite';
-$books = sys_get_temp_dir() . '/codex_p21_books_' . getmypid();
-@mkdir($books . '/a/Manuscript', 0777, true);
-putenv('DB_DRIVER=sqlite'); putenv('DB_PATH=' . $tmp); putenv('CODEX_BOOKS_DIR=' . $books);
-$_ENV['DB_DRIVER'] = 'sqlite'; $_ENV['DB_PATH'] = $tmp; $_ENV['CODEX_BOOKS_DIR'] = $books;
-register_shutdown_function(function () use ($tmp, $books) {
-    @unlink($tmp);
-    foreach (glob($books . '/a/Manuscript/*') ?: [] as $f) @unlink($f);
-});
+$tmp = tempnam(sys_get_temp_dir(), 'codex_lock_') . '.sqlite';
+putenv('DB_DRIVER=sqlite'); putenv('DB_PATH=' . $tmp);
+$_ENV['DB_DRIVER'] = 'sqlite'; $_ENV['DB_PATH'] = $tmp;
+register_shutdown_function(function () use ($tmp) { @unlink($tmp); });
 
 require_once __DIR__ . '/../../src/repo.php';
 
@@ -50,18 +45,15 @@ check('releasing removes the editor', active_editors($cid) === []);
 touch_edit_lock('A', 777, $alice);
 check('a lock on another chapter does not leak', active_editors($cid) === [] && count(active_editors(777)) === 1);
 
-/* ---- optimistic conflict check (never clobber) ---- */
-check('books_dir is configured for this test', (cfg()['books_dir'] ?? '') === $books);
+/* ---- optimistic conflict check (never clobber) — pure DB post-A4 ---- */
 q("INSERT INTO chapters (id, book_id, num, title, body, file) VALUES (900, 'A', '1', 'One', ?, 'ch1.md')", ["Original body.\n"]);
-file_put_contents($books . '/a/Manuscript/ch1.md', "Original body.\n");
 $loadedHash = md5(md_body_norm("Original body.\n"));
 // a co-author changes the DB body underneath us
 q("UPDATE chapters SET body=? WHERE id=900", ["Body changed by a co-author.\n"]);
 $r = write_chapter_file('A', 900, "My rewrite.\n", $loadedHash);
 check('a stale save is refused as a conflict', $r['status'] === 'conflict');
 check('the co-author\'s body is untouched (never clobber)', md_body_norm(val("SELECT body FROM chapters WHERE id=900")) === md_body_norm("Body changed by a co-author.\n"));
-// re-syncing the on-disk file, a save from the CURRENT base is accepted
-file_put_contents($books . '/a/Manuscript/ch1.md', "Body changed by a co-author.\n");
+// a save from the CURRENT base is accepted
 $freshHash = md5(md_body_norm("Body changed by a co-author.\n"));
 $r2 = write_chapter_file('A', 900, "Body changed by a co-author.\nPlus my line.\n", $freshHash);
 check('a save from the current base is accepted', $r2['status'] === 'ok');
